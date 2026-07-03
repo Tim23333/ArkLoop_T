@@ -15,10 +15,19 @@ hiddenimports += collect_submodules('webview')
 hiddenimports += collect_submodules('clr_loader')
 hiddenimports += ['pythonnet']
 hiddenimports += maa_hiddenimports
+# websocket-client (the `websocket` module) loads many submodules lazily
+# (websocket._app, websocket._core, websocket._abnf, ...); collect them so the
+# WS time source works in the frozen bundle.
+hiddenimports += collect_submodules('websocket')
 # NumPy 2.x 需要显式收集 _core 子模块，否则打包后会报
 # No module named 'numpy._core._exceptions' 等 C-ext 导入错误。
 hiddenimports += collect_submodules('numpy._core')
 hiddenimports += collect_submodules('numpy.lib')
+
+# Tesseract-OCR is optional: tesserocr has no Python 3.12 wheel and the live
+# pipeline degrades gracefully without it (pause-detection OCR only).  Only
+# bundle it + the tessdata runtime hook when the folder is staged at root.
+_has_tesseract = os.path.isdir(os.path.join(SPECPATH, 'Tesseract-OCR'))
 
 datas = [
     ('ui/dist',             'ui/dist'),
@@ -26,10 +35,13 @@ datas = [
     ('calibration',         'calibration'),
     ('hook',                'hook'),
     ('config.example.json', '.'),
-    ('Tesseract-OCR',       'Tesseract-OCR'),
     ('src/maa/nodes',                  'src/maa/nodes'),    # MAA pipeline + OCR model weights
     ('src/maa/prts_plus_override.json', 'src/maa'),         # project-specific ROI overrides
 ] + maa_datas
+if _has_tesseract:
+    datas.append(('Tesseract-OCR', 'Tesseract-OCR'))
+
+runtime_hooks = ['pyi_rth_tessdata.py'] if _has_tesseract else []
 
 a = Analysis(
     ['scripts/arkloop_webview.py'],
@@ -38,7 +50,7 @@ a = Analysis(
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
-    runtime_hooks=['pyi_rth_tessdata.py'],
+    runtime_hooks=runtime_hooks,
     excludes=[],
     noarchive=False,
 )

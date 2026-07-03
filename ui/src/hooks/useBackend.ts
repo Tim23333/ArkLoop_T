@@ -76,6 +76,8 @@ export interface PyWebviewApi {
   capture_with_grid: (mapCode: string) => Promise<string>
   get_app_config: () => Promise<AppConfig>
   update_app_config: (patch: Partial<AppConfig>) => Promise<boolean>
+  get_ws_status: () => Promise<WSStatus>
+  restart_ws_source: (url?: string) => Promise<boolean>
 }
 
 export interface AppConfig {
@@ -86,12 +88,26 @@ export interface AppConfig {
     window_name?: string
     sub_window_name?: string
   }
+  time_source?: {
+    ws_url?: string
+  }
+}
+
+export interface WSStatus {
+  connected?: boolean
+  transport_connected?: boolean
+  mem_ok?: boolean
+  url?: string
+  frame_count?: number
+  game_time?: number
+  ever_received?: boolean
 }
 
 export function useBackend() {
   const [events, setEvents] = useState<BackendEvent[]>([])
   const [state, setState] = useState<BackendState | null>(null)
   const [axis, setAxis] = useState<AxisAction[]>([])
+  const [wsStatus, setWsStatus] = useState<WSStatus | null>(null)
   const [api, setApi] = useState<PyWebviewApi | undefined>(() =>
     typeof window !== 'undefined' && window.pywebview?.api
       ? (window.pywebview.api as unknown as PyWebviewApi)
@@ -126,6 +142,8 @@ export function useBackend() {
         }) as BackendState)
       } else if (event.event_type === 'axis') {
         setAxis((event.data as unknown as AxisAction[]) ?? [])
+      } else if (event.event_type === 'ws_status') {
+        setWsStatus(event.data as WSStatus)
       }
     }
     window.__onBackendEvent = handler
@@ -335,6 +353,16 @@ export function useBackend() {
     return api.update_app_config(patch)
   }, [api])
 
+  const getWsStatus = useCallback(async () => {
+    if (!api) return { connected: false } as WSStatus
+    return api.get_ws_status()
+  }, [api])
+
+  const restartWsSource = useCallback(async (url?: string) => {
+    if (!api) return false
+    return api.restart_ws_source(url)
+  }, [api])
+
   return {
     api,
     events,
@@ -375,5 +403,8 @@ export function useBackend() {
     captureWithGrid,
     getAppConfig,
     updateAppConfig,
+    getWsStatus,
+    restartWsSource,
+    wsStatus,
   }
 }

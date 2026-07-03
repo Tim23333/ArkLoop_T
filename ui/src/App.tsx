@@ -120,6 +120,9 @@ export default function App() {
     captureWithGrid,
     getAppConfig,
     updateAppConfig,
+    getWsStatus,
+    restartWsSource,
+    wsStatus,
   } = useBackend()
 
   // ── init ────────────────────────────────────────────────────
@@ -847,6 +850,9 @@ export default function App() {
         open={showSettings}
         getConfig={getAppConfig}
         updateConfig={updateAppConfig}
+        getWsStatus={getWsStatus}
+        restartWsSource={restartWsSource}
+        wsStatus={wsStatus}
         onDismiss={() => setShowSettings(false)}
       />
 

@@ -1,22 +1,18 @@
-import json
-import logging
 import threading
 import time
 from typing import Callable, Dict, Any, List, Optional, Tuple
 
 from src.cache import get_map_by_code, get_map_by_name
-from src.config import ImageProcessingConfig as imgconfig
 from src.config import PerformActionConfig as actionconfig
 from src.excel import StatusColor
-from src.frame.calibration import load_calibration_by_filename
 from src.logic.action import Action, ActionType
 from src.logic.auto_enter import auto_enter
 from src.logic.calc_view import transform_map_to_view
 from src.logic.convert_pos import convert_position
 from src.logic.analyze_time import get_game_time, set_game_time_observer, set_time_source
 from src.logic.game_time import GameTime
+from src.logic.ws_time_source import get_ws_time_source
 from src.logic.perform_action import perform_action, PerformLateError, UserPausedError
-from src.logic.time_source import PlaybackTimeSource
 from src.logger import logger
 from src.utils.error_to_log import ErrorToLog
 
@@ -309,50 +305,21 @@ class AxisRunner:
 
     def run(self):
         """Execute all actions."""
-        # Install the playback time source (cost-bar cycle counter) before any
-        # ``get_game_time()`` is called.  Calibration is required: cycle is
-        # derived from the calibrated tick detector, no OCR fallback.
-        std_w, std_h = imgconfig.SCREEN_STANDARD_SIZE
-
-        # Load the calibration explicitly configured for this timeline.
-        # calibration_path is stored as a relative path (e.g. calibration\foo.json);
-        # resolve by filename via load_calibration_by_filename so it works in both
-        # source mode (CWD = project root) and frozen/EXE mode (_internal\calibration\).
-        calib = None
-        calibration_path = self.settings.get("calibration_path")
-        if calibration_path:
-            from pathlib import Path
-            candidate = Path(calibration_path)
-            if candidate.is_absolute():
-                try:
-                    with open(candidate, "r", encoding="utf-8") as f:
-                        calib = json.load(f)
-                    logger.info(f"Loaded configured calibration for playback: {calibration_path}")
-                except Exception as exc:
-                    logger.warning(f"Failed to load configured calibration {calibration_path}: {exc}")
-            else:
-                # Relative path: resolve by filename only via _CALIBRATION_DIR.
-                # Path.cwd() is wrong in frozen (EXE) mode — the calibration dir
-                # is inside _internal/, not next to the EXE.  load_calibration_by_filename
-                # uses _CALIBRATION_DIR which is computed from __file__ and is correct
-                # in both source and frozen modes.
-                filename = candidate.name
-                calib = load_calibration_by_filename(filename)
-                if calib is not None:
-                    logger.info(f"Loaded configured calibration for playback: {filename}")
-                else:
-                    logger.warning(f"Could not find configured calibration: {filename}")
-        if calib is None:
+        # The time axis now comes from the WebSocket time source (external
+        # game-memory reader) instead of cost-bar calibration.  The singleton
+        # is started once at app startup; here we only ensure it is live and
+        # refuse to play back when the feed is unavailable.
+        ws = get_ws_time_source()
+        ws.start()
+        if not ws.wait_connected(timeout=5):
             raise ErrorToLog(
-                (
-                    f"无法加载校准文件 {calibration_path!r}，请检查校准文件是否存在。"
-                    if calibration_path
-                    else "时间轴未指定校准文件，无法回放。请在时间轴设置中选择校准文件。"
-                )
+                "时间源 WS 未连接，无法回放。请在设置中配置正确的 WS 地址并启动游戏时间服务。"
             )
-        GameTime.apply_calibration(calib)
-        time_source = PlaybackTimeSource(calib)
-        set_time_source(time_source)
+
+        # TICK_MAX drives the (cycle, tick) decomposition of frame_count.
+        # It is a per-timeline setting (default 30); no calibration needed.
+        GameTime.set_tick_max(int(self.settings.get("max_tick") or 30))
+        set_time_source(ws)  # no-op compat; documents intent
 
         self._apply_settings()
         map_data = self._load_map()

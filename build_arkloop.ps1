@@ -24,15 +24,19 @@ if (-not (Test-Path (Join-Path $root 'icon.ico'))) {
     throw 'icon.ico not found at project root; place a Windows .ico icon file there.'
 }
 
-# 3. Stage Tesseract-OCR at project root (copy from existing _internal if needed)
-Write-Host '[3/4] Staging Tesseract-OCR...' -ForegroundColor Cyan
+# 3. Stage Tesseract-OCR at project root (OPTIONAL).
+#    tesserocr has no Python 3.12 wheel and the live pipeline degrades
+#    gracefully without it (pause-detection OCR only), so Tesseract is no
+#    longer required to build.  The arkloop.spec bundles it only if present.
+Write-Host '[3/4] Staging Tesseract-OCR (optional)...' -ForegroundColor Cyan
 $tessDst = Join-Path $root 'Tesseract-OCR'
 if (-not (Test-Path $tessDst)) {
     $tessSrc = Join-Path $root '_internal\Tesseract-OCR'
-    if (-not (Test-Path $tessSrc)) {
-        throw "Tesseract-OCR not found at $tessSrc; place a Tesseract folder (with tesseract.exe + tessdata/) at project root."
+    if (Test-Path $tessSrc) {
+        Copy-Item -Recurse -Force $tessSrc $tessDst
+    } else {
+        Write-Host "Tesseract-OCR not found; building WITHOUT it (pause-detection OCR will be unavailable). To enable, place a Tesseract folder (tesseract.exe + tessdata/) at project root." -ForegroundColor Yellow
     }
-    Copy-Item -Recurse -Force $tessSrc $tessDst
 }
 
 # 4. Run PyInstaller

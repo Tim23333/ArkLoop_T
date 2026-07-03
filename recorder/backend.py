@@ -27,6 +27,7 @@ from src.config import ImageProcessingConfig as imgconfig
 from src.config import PerformActionConfig as performconfig
 from src.input.action_recorder import ActionRecorder
 from src.logger import logger
+from src.logic.ws_time_source import get_ws_time_source
 from recorder.action_archive import ActionArchive
 from recorder.action_recognizer import ActionType, AvatarMatcher, DirectionType, SemanticAction
 from recorder.action_worker import ActionItem, ActionWorker
@@ -42,13 +43,6 @@ try:
 except Exception as exc:  # pragma: no cover - optional dependency
     FrameSource = None  # type: ignore[assignment, misc]
     logger.warning(f"FrameSource unavailable: {exc}")
-
-try:
-    from src.frame.detector import AnalysisWorker, CostBarDetector
-except Exception as exc:  # pragma: no cover - optional dependency
-    AnalysisWorker = None  # type: ignore[assignment, misc]
-    CostBarDetector = None  # type: ignore[assignment, misc]
-    logger.warning(f"Cost-bar analysis unavailable: {exc}")
 
 
 __all__ = [
@@ -80,21 +74,16 @@ class SlotAvatarMatcher:
 
 
 def resolve_max_tick(max_tick: Optional[int], calibration_path: Optional[Path]) -> int:
-    """Resolve ``max_tick`` from explicit value, calibration file, or default."""
+    """Resolve ``max_tick`` for the (cycle, tick) decomposition of frame_count.
+
+    Time itself now comes from the WS feed; ``max_tick`` is only the
+    per-timeline divisor (default 30).  ``calibration_path`` is accepted for
+    API compatibility but no longer read — cost-bar calibration is retired for
+    live recording.
+    """
+    _ = calibration_path  # deprecated; kept for API compatibility
     if max_tick is not None:
         return max_tick
-    if calibration_path is not None and calibration_path.is_file():
-        try:
-            with open(calibration_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            profiles = data.get("profiles", [])
-            if profiles:
-                total = profiles[0].get("total_frames")
-                if isinstance(total, int) and total > 0:
-                    logger.info(f"Using max_tick={total} from {calibration_path}")
-                    return total
-        except Exception as exc:
-            logger.warning(f"Failed to read calibration {calibration_path}: {exc}")
     return 30
 
 
@@ -308,23 +297,11 @@ class ActionBackend:
             except Exception as exc:
                 logger.warning(f"Failed to start frame source: {exc}")
 
-        # Cost-bar analysis worker. The detector MUST use the same calibration
-        # the user picked in NewTimelineDialog, otherwise ticks reported to the
-        # UI come from one profile (e.g. 119f) while the timeline renders
-        # against another (e.g. 30f), leaving the playhead stuck in cycle 0/1.
-        if self.cost_bar and self.frame_source is not None and AnalysisWorker is not None and CostBarDetector is not None:
-            try:
-                detector = self._build_cost_bar_detector()
-                if detector is not None and detector.is_ready():
-                    self.analysis_worker = AnalysisWorker(
-                        frame_queue=self.frame_source.frame_queue,
-                        detector=detector,
-                        fps=30,
-                    ).start()
-                else:
-                    logger.debug("Cost-bar calibration not ready; tick analysis disabled")
-            except Exception as exc:
-                logger.warning(f"Failed to start cost-bar analysis: {exc}")
+        # Game time now comes from the WS time source (process singleton
+        # started in init_app), so there is no cost-bar AnalysisWorker here.
+        # The FrameSource above is kept purely for vision (avatar matching +
+        # side-view OCR) — it no longer drives the time axis.
+        self.analysis_worker = None
 
         # Bring MuMu to the foreground before the recorder caches its client
         # rect: this avoids two failure modes together — (a) the user's first
@@ -425,12 +402,8 @@ class ActionBackend:
             except Exception as exc:
                 logger.warning(f"Error stopping recorder: {exc}")
 
-        if self.analysis_worker is not None:
-            try:
-                self.analysis_worker.stop()
-            except Exception as exc:
-                logger.warning(f"Error stopping analysis worker: {exc}")
-
+        # analysis_worker is retired (time comes from the WS singleton); the
+        # field is kept as None for any external readers checking its presence.
         if self.frame_source is not None:
             try:
                 self.frame_source.stop()
@@ -458,51 +431,24 @@ class ActionBackend:
 
     @property
     def latest_game_time(self) -> Optional[Dict[str, int]]:
-        """Return best-effort current (cycle, tick) from analysis worker snapshot."""
-        if self.analysis_worker is None:
-            return None
+        """Return best-effort current (cycle, tick) from the WS time feed.
+
+        Biased by ``cycle_offset`` so a resumed recording's playhead matches
+        the absolute cycle that will land in the timeline file.
+        """
         try:
-            snap = self.analysis_worker.snapshot()
-            if snap and isinstance(snap, dict):
-                return {
-                    "cycle": int(snap.get("cycle", 0) or 0) + self.cycle_offset,
-                    "tick": int(snap.get("tick", snap.get("frame", 0)) or 0),
-                }
+            ws = get_ws_time_source()
+            gt = ws.get_game_time()
+            return {
+                "cycle": int(gt.cycle) + self.cycle_offset,
+                "tick": int(gt.tick),
+            }
         except Exception:
-            pass
-        return None
+            return None
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-    def _build_cost_bar_detector(self) -> Optional[Any]:
-        """Return a CostBarDetector loaded from ``self.calibration_path``.
-
-        Relative paths are resolved via ``Path(__file__).resolve().parent.parent``
-        so they work correctly in both source mode (project root) and frozen
-        onedir mode (_internal/).  Returns None if no path is configured or the
-        file cannot be loaded — recording can continue without a cost-bar
-        detector (live tick display will be unavailable).
-        """
-        if CostBarDetector is None:
-            return None
-        if self.calibration_path is None:
-            return None
-        candidate = Path(self.calibration_path)
-        if not candidate.is_absolute():
-            candidate = Path(__file__).resolve().parent.parent / candidate
-        try:
-            with open(candidate, "r", encoding="utf-8") as f:
-                calib = json.load(f)
-            logger.info(f"Using calibration {candidate} for cost-bar detector")
-            return CostBarDetector(calib)
-        except Exception as exc:
-            logger.warning(
-                f"Failed to load calibration {self.calibration_path}: {exc}; "
-                "cost-bar detector unavailable for this recording session"
-            )
-        return None
-
     def _build_device_deployed(self) -> Dict[str, Tuple[int, int]]:
         """Convert ``self._devices`` into a ``recognizer.deployed`` style dict.
 
@@ -571,12 +517,22 @@ class ActionBackend:
                         except Exception:
                             frame, frame_ts = (None, 0.0)
 
+                    # Anchor this mouse action to the current game time read
+                    # from the WS feed (cycle/tick decomposition of frame_count).
                     tick_state = None
-                    if self.analysis_worker is not None:
-                        try:
-                            tick_state = self.analysis_worker.snapshot()
-                        except Exception:
-                            tick_state = None
+                    try:
+                        ws = get_ws_time_source()
+                        gt = ws.get_game_time()
+                        fc, game_time, mem_ok = ws.latest()
+                        tick_state = {
+                            "tick": int(gt.tick),
+                            "cycle": int(gt.cycle),
+                            "total_elapsed_frames": int(fc),
+                            "game_time": float(game_time),
+                            "connected": bool(mem_ok),
+                        }
+                    except Exception:
+                        tick_state = None
 
                     self.action_worker.enqueue(
                         ActionItem(

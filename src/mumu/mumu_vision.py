@@ -115,6 +115,16 @@ def capture_game_window(
         return cv2.resize(img, (std_w, std_h))
 
     elif isinstance(_controller, Win32CaptureController):
+        # MuMu recreates its render sub-window across scenes; refresh the
+        # handle each call so a stale hwnd doesn't make BitBlt grab the wrong
+        # (or a dead) window. Falls back to the cached handle if re-resolution
+        # fails (e.g. MuMu briefly not found).
+        try:
+            fresh = get_handle()
+            if fresh:
+                _controller.hwnd = fresh
+        except Exception as exc:
+            logger.debug(f"handle refresh failed, using cached hwnd: {exc}")
         if ratio is None:
             return _controller.capture_frame(color=color)
         return _controller.capture_window_area(ratio)

@@ -17,58 +17,103 @@ class Win32CaptureController(BaseCaptureController):
 
     def __init__(self, hwnd: int):
         self.hwnd = hwnd
-        self.window_dc = None
-        self.mfc_dc = None
-        self.save_dc = None
-        self.save_bitmap = None
+        # Cached geometry — recomputed by ``_sync_geometry`` on each capture so
+        # a window resize between calls doesn't produce a stretched/failed grab.
+        self.offset_x = 0
+        self.offset_y = 0
         self.width = 0
         self.height = 0
 
     def connect(self):
-        # Use client area only so the captured content matches the MuMu DLL
-        # screenshot (which returns the emulator display, not the window frame).
+        # Nothing persistent to create.  GDI objects are allocated per capture
+        # in ``_grab_full`` / ``capture_window_area`` and torn down immediately
+        # after.  Caching a GetWindowDC handle across calls corrupts state in
+        # pywin32 and makes every capture after the first fail with
+        # ``BitBlt failed``; the per-call lifecycle is the robust pattern.
+        self._sync_geometry()
+        return self
+
+    def _sync_geometry(self) -> None:
+        """Recompute client-area size + window-to-client offset for ``self.hwnd``."""
         window_left, window_top, _, _ = win32gui.GetWindowRect(self.hwnd)
         client_left, client_top = win32gui.ClientToScreen(self.hwnd, (0, 0))
         self.offset_x = client_left - window_left
         self.offset_y = client_top - window_top
-
         client_rect = win32gui.GetClientRect(self.hwnd)
         self.width = client_rect[2]
         self.height = client_rect[3]
 
-        self.window_dc = win32gui.GetWindowDC(self.hwnd)
-        self.mfc_dc = win32ui.CreateDCFromHandle(self.window_dc)
-        self.save_dc = self.mfc_dc.CreateCompatibleDC()
+    @staticmethod
+    def _release(window_dc, mfc_dc, save_dc, bitmap, prev_obj, hwnd) -> None:
+        """Tear down per-call GDI objects in the order GDI requires.
 
-        self.save_bitmap = win32ui.CreateBitmap()
-        self.save_bitmap.CreateCompatibleBitmap(self.mfc_dc, self.width, self.height)
-        self.save_dc.SelectObject(self.save_bitmap)
-        return self
+        A bitmap still selected into a DC cannot be deleted, so the previous
+        stock object must be selected back first.
+        """
+        try:
+            if prev_obj is not None:
+                save_dc.SelectObject(prev_obj)
+        except Exception:
+            pass
+        try:
+            if bitmap is not None:
+                win32gui.DeleteObject(bitmap.GetHandle())
+        except Exception:
+            pass
+        try:
+            save_dc.DeleteDC()
+        except Exception:
+            pass
+        try:
+            mfc_dc.DeleteDC()
+        except Exception:
+            pass
+        try:
+            win32gui.ReleaseDC(hwnd, window_dc)
+        except Exception:
+            pass
 
-    def capture_frame(self, color: bool = False) -> np.ndarray:
-        """Capture the full window as a grayscale or BGR numpy array."""
-        if self.save_dc is None:
-            raise RuntimeError("Win32CaptureController not connected")
+    def _grab_full(self, color: bool) -> np.ndarray:
+        """Capture the full client area with fresh GDI objects, then clean up."""
+        hwnd = self.hwnd
+        width, height = self.width, self.height
+        if width <= 0 or height <= 0:
+            raise RuntimeError("Win32CaptureController has invalid window size")
 
-        self.save_dc.BitBlt(
-            (0, 0),
-            (self.width, self.height),
-            self.mfc_dc,
-            (self.offset_x, self.offset_y),
-            win32con.SRCCOPY,
-        )
-
-        bmpinfo = self.save_bitmap.GetInfo()
-        signed_ints_array = self.save_bitmap.GetBitmapBits(True)
-        img = np.frombuffer(signed_ints_array, dtype="uint8")
-        img.shape = (bmpinfo["bmHeight"], bmpinfo["bmWidth"], 4)
+        window_dc = win32gui.GetWindowDC(hwnd)
+        mfc_dc = win32ui.CreateDCFromHandle(window_dc)
+        save_dc = mfc_dc.CreateCompatibleDC()
+        save_bitmap = win32ui.CreateBitmap()
+        save_bitmap.CreateCompatibleBitmap(mfc_dc, width, height)
+        prev_obj = save_dc.SelectObject(save_bitmap)
+        try:
+            save_dc.BitBlt(
+                (0, 0),
+                (width, height),
+                mfc_dc,
+                (self.offset_x, self.offset_y),
+                win32con.SRCCOPY,
+            )
+            bmpinfo = save_bitmap.GetInfo()
+            signed_ints_array = save_bitmap.GetBitmapBits(True)
+            img = np.frombuffer(signed_ints_array, dtype="uint8")
+            img.shape = (bmpinfo["bmHeight"], bmpinfo["bmWidth"], 4)
+        finally:
+            self._release(window_dc, mfc_dc, save_dc, save_bitmap, prev_obj, hwnd)
 
         if color:
             img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
         else:
             img = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
-        img = cv2.resize(img, imgconfig.SCREEN_STANDARD_SIZE)
-        return img
+        return cv2.resize(img, imgconfig.SCREEN_STANDARD_SIZE)
+
+    def capture_frame(self, color: bool = False) -> np.ndarray:
+        """Capture the full window as a grayscale or BGR numpy array."""
+        # Refresh geometry each call — the MuMu render sub-window can be
+        # recreated across scenes, and a resized window would otherwise be
+        # captured at stale dimensions.
+        self._sync_geometry()
+        return self._grab_full(color=color)
 
     def capture_window_area(
         self, ratio: Tuple[float, float, float, float]
@@ -81,55 +126,49 @@ class Win32CaptureController(BaseCaptureController):
         if ratio[0] >= ratio[2] or ratio[1] >= ratio[3]:
             raise ValueError("Invalid ratio values")
 
-        # Ratios are relative to the client area (game display).
+        self._sync_geometry()
         window_width = self.width
         window_height = self.height
-        rect = (
-            int(window_width * ratio[0]),
-            int(window_height * ratio[1]),
-            int(window_width * ratio[2]),
-            int(window_height * ratio[3]),
-        )
 
-        capture_left, capture_top, capture_right, capture_bottom = rect
+        capture_left = int(window_width * ratio[0])
+        capture_top = int(window_height * ratio[1])
+        capture_right = int(window_width * ratio[2])
+        capture_bottom = int(window_height * ratio[3])
         capture_width = capture_right - capture_left
         capture_height = capture_bottom - capture_top
+        if capture_width <= 0 or capture_height <= 0:
+            raise ValueError("Computed capture area is empty")
 
+        hwnd = self.hwnd
+        window_dc = win32gui.GetWindowDC(hwnd)
+        mfc_dc = win32ui.CreateDCFromHandle(window_dc)
+        save_dc = mfc_dc.CreateCompatibleDC()
         area_bitmap = win32ui.CreateBitmap()
-        area_bitmap.CreateCompatibleBitmap(self.mfc_dc, capture_width, capture_height)
-        self.save_dc.SelectObject(area_bitmap)
-        self.save_dc.BitBlt(
-            (0, 0),
-            (capture_width, capture_height),
-            self.mfc_dc,
-            (capture_left + self.offset_x, capture_top + self.offset_y),
-            win32con.SRCCOPY,
-        )
+        area_bitmap.CreateCompatibleBitmap(mfc_dc, capture_width, capture_height)
+        prev_obj = save_dc.SelectObject(area_bitmap)
+        try:
+            save_dc.BitBlt(
+                (0, 0),
+                (capture_width, capture_height),
+                mfc_dc,
+                (capture_left + self.offset_x, capture_top + self.offset_y),
+                win32con.SRCCOPY,
+            )
+            bmpinfo = area_bitmap.GetInfo()
+            signed_ints_array = area_bitmap.GetBitmapBits(True)
+            img = np.frombuffer(signed_ints_array, dtype="uint8")
+            img.shape = (bmpinfo["bmHeight"], bmpinfo["bmWidth"], 4)
+        finally:
+            self._release(window_dc, mfc_dc, save_dc, area_bitmap, prev_obj, hwnd)
 
-        bmpinfo = area_bitmap.GetInfo()
-        signed_ints_array = area_bitmap.GetBitmapBits(True)
-        img = np.frombuffer(signed_ints_array, dtype="uint8")
-        img.shape = (bmpinfo["bmHeight"], bmpinfo["bmWidth"], 4)
         img = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
-
         standardized_width = capture_width * imgconfig.SCREEN_STANDARD_SIZE[0] // window_width
         standardized_height = capture_height * imgconfig.SCREEN_STANDARD_SIZE[1] // window_height
-        img = cv2.resize(img, (standardized_width, standardized_height))
-        return img
+        return cv2.resize(img, (standardized_width, standardized_height))
 
     def disconnect(self):
-        if self.save_bitmap:
-            win32gui.DeleteObject(self.save_bitmap.GetHandle())
-            self.save_bitmap = None
-        if self.save_dc:
-            self.save_dc.DeleteDC()
-            self.save_dc = None
-        if self.mfc_dc:
-            self.mfc_dc.DeleteDC()
-            self.mfc_dc = None
-        if self.window_dc:
-            win32gui.ReleaseDC(self.hwnd, self.window_dc)
-            self.window_dc = None
+        # Nothing persistent — GDI objects are per-call. Kept for API parity.
+        pass
 
     def __enter__(self):
         return self.connect()

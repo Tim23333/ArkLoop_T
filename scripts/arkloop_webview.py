@@ -39,6 +39,13 @@ from recorder.backend import ActionBackend, write_axis_json
 from recorder.action_recognizer import AvatarMatcher
 from src.cache import OPERATOR_MAPPING
 from src.logger import logger
+from src.logic.ws_time_source import DEFAULT_WS_URL, get_ws_time_source
+
+try:
+    from src.maa import create_side_view_detector
+except Exception as exc:  # pragma: no cover - optional dependency
+    create_side_view_detector = None  # type: ignore[assignment, misc]
+    logger.warning(f"MAA side-view detector unavailable: {exc}")
 
 
 class ArkLoopApi:
@@ -345,6 +352,26 @@ class ArkLoopApi:
         try:
             timelines_dir.mkdir(parents=True, exist_ok=True)
 
+            # Start the WebSocket time source using the URL configured in
+            # config.json (time_source.ws_url).  This is the sole game-time
+            # provider for both recording and playback; cost-bar detection is
+            # retired.  Started here so the feed is live before any record /
+            # playback session, and the UI can show connection status.
+            try:
+                cfg_path = user_root / "config.json"
+                ws_url = DEFAULT_WS_URL
+                if cfg_path.is_file():
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        cfg = json.load(f)
+                    ts_cfg = cfg.get("time_source") or {}
+                    if isinstance(ts_cfg, dict) and ts_cfg.get("ws_url"):
+                        ws_url = str(ts_cfg["ws_url"])
+                ws = get_ws_time_source()
+                ws.start(url=ws_url)
+                logger.info(f"WS time source started (url={ws_url})")
+            except Exception as exc:
+                logger.warning(f"Failed to start WS time source: {exc}")
+
             # Pre-warm avatar data URIs
             avatar_dir = project_root / "resource" / "avatar"
             count = 0
@@ -510,6 +537,36 @@ class ArkLoopApi:
         except Exception as exc:
             logger.warning(f"Failed to read config.json: {exc}")
         return {}
+
+    def get_ws_status(self) -> Dict[str, Any]:
+        """Return the WebSocket time source connection status + latest reading."""
+        try:
+            return get_ws_time_source().status()
+        except Exception as exc:
+            logger.warning(f"get_ws_status failed: {exc}")
+            return {"connected": False, "url": DEFAULT_WS_URL}
+
+    def restart_ws_source(self, url: Optional[str] = None) -> bool:
+        """(Re)start the WS time source with a new URL.
+
+        Called after the user edits the WS URL in Settings.  Persists the URL
+        to config.json so it survives restarts, then reconnects immediately.
+        """
+        try:
+            if url:
+                clean = url.strip()
+                if clean:
+                    # Persist to config.json so init_app picks it up next launch.
+                    self.update_app_config({"time_source": {"ws_url": clean}})
+                    get_ws_time_source().start(url=clean)
+                    logger.info(f"WS time source restarted (url={clean})")
+                    return True
+            # No URL: just restart with whatever is in config / default.
+            get_ws_time_source().start()
+            return True
+        except Exception as exc:
+            logger.exception(f"restart_ws_source failed: {exc}")
+            return False
 
     def update_app_config(self, patch: Dict[str, Any]) -> bool:
         """Deep-merge ``patch`` into ``config.json`` and persist.
@@ -1009,6 +1066,16 @@ class ArkLoopApi:
                 except Exception:
                     logger.exception("Error stopping backend during shutdown")
                 self.backend = None
+        # Stop any running playback thread.
+        try:
+            self.stop_playback(reset_state=True)
+        except Exception:
+            pass
+        # Stop the process-wide WS time source.
+        try:
+            get_ws_time_source().stop()
+        except Exception:
+            logger.debug("WS time source stop failed during shutdown", exc_info=True)
 
 
 def main() -> None:
@@ -1065,25 +1132,49 @@ def main() -> None:
 
     # Periodically push state while recording.
     #
-    # Two rates: the cost-bar AnalysisWorker already detects (cycle, tick) at its
-    # native 30 fps, so we ship a *lightweight* `game_time` event at 30 Hz (only
-    # when it actually changes) for a smooth playhead — and the heavier full
-    # `state` + axis only at ~10 Hz, which is plenty for recognizer status.
+    # Two rates: the WS time source pushes (cycle, tick) at the game's native
+    # rate, so we ship a *lightweight* `game_time` event at 30 Hz (only when it
+    # actually changes) for a smooth playhead — and the heavier full `state` +
+    # axis only at ~10 Hz, which is plenty for recognizer status.  The WS feed
+    # is live even when not recording, so the playhead shows whenever the game
+    # time service is connected.
     def _state_publisher() -> None:
         last_axis_len: int = 0
         last_gt: Optional[Dict[str, int]] = None
+        last_ws_status: Optional[Dict[str, Any]] = None
         slow_counter = 0
         while True:
             time.sleep(1.0 / 30.0)  # ~33 ms, 30 Hz
             try:
+                # Fast lane: lightweight cycle/tick from the WS feed, pushed
+                # only on change.  Available with or without an active backend.
+                try:
+                    ws = get_ws_time_source()
+                    gt = ws.get_game_time()
+                    gt_dict = {"cycle": int(gt.cycle), "tick": int(gt.tick)}
+                    if gt_dict != last_gt:
+                        api._push_event("game_time", gt_dict)
+                        last_gt = gt_dict
+                except Exception:
+                    pass
+
+                # Surface WS connection status changes (for the settings UI).
+                try:
+                    status = get_ws_time_source().status()
+                    ws_view = {
+                        "connected": status.get("connected"),
+                        "mem_ok": status.get("mem_ok"),
+                        "url": status.get("url"),
+                    }
+                    if ws_view != last_ws_status:
+                        api._push_event("ws_status", status)
+                        last_ws_status = ws_view
+                except Exception:
+                    pass
+
+                # Slow lane: full state + axis only while recording.
                 if api.backend is None:
                     continue
-                # Fast lane: lightweight cycle/tick, pushed only on change.
-                gt = api.backend.latest_game_time
-                if gt and gt != last_gt:
-                    api._push_event("game_time", gt)
-                    last_gt = gt
-                # Slow lane: full state + axis every 3rd tick (~10 Hz).
                 slow_counter += 1
                 if slow_counter >= 3:
                     slow_counter = 0

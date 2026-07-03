@@ -1,42 +1,44 @@
-"""Game-time reader for playback.
+"""Game-time reader backed by the WebSocket time source.
 
-Drives ``GameTime`` from a cost-bar ``PlaybackTimeSource`` (cycle counter +
-calibrated tick).  The in-game cost number (OCR) is no longer used as the
-time axis — cycle is monotonic, OCR cost is not (operators consume cost).
+``get_game_time()`` reads the latest ``frame_count`` pushed by the external WS
+service (``ws_time_source``) and decomposes it into ``GameTime(cycle, tick)``.
+The cost-bar OCR / pixel-detection time source is retired: the external service
+reads the game's memory directly, which is more accurate and cheaper than
+capturing+analyzing a screenshot on every call.
 
-The time source is owned by ``AxisRunner`` (or any other caller) via
-``set_time_source()``; this module just dereferences it.
+The optional observer is still notified on every read — playback uses it to
+stream the live (cycle, tick) to the UI and to check timeline breakpoints.
 """
 
 from __future__ import annotations
 
 from typing import Callable, Optional
 
-from src.config import ImageProcessingConfig as imgconfig
-from src.logic.game_time import GameTime
-from src.logic.time_source import PlaybackTimeSource
-from src.mumu.mumu_vision import capture_game_window
-from src.utils.error_to_log import ErrorToLog
 from src.logger import logger
-
-# Injected by AxisRunner.run() (and cleared in its finally block).
-_time_source: Optional[PlaybackTimeSource] = None
+from src.logic.game_time import GameTime
+from src.logic.ws_time_source import WSTimeSource, get_ws_time_source
 
 # Optional observer notified of every ``get_game_time`` reading.  Playback uses
-# this to stream the live (cycle, tick) to the UI at the runner's own read
-# rate — accurate even when the game is paused / frame-stepped, because it
-# reflects exactly the frames the runner samples.
+# this to stream the live (cycle, tick) to the UI at the runner's own read rate
+# — accurate even when the game is paused / frame-stepped, because it reflects
+# exactly the frames the runner samples.
 _game_time_observer: Optional[Callable[[int, int], None]] = None
 
 
-def set_time_source(ts: Optional[PlaybackTimeSource]) -> None:
-    """Inject (or clear with ``None``) the active playback time source."""
-    global _time_source
-    _time_source = ts
+def set_time_source(ts: Optional[object]) -> None:
+    """Deprecated compatibility shim.
+
+    The WS time source is now the sole time provider and is owned as a
+    process-wide singleton (started in ``init_app``).  Nothing needs to be
+    installed per-session, so this is a no-op kept only so legacy callers
+    (``main.py``) do not break.
+    """
+    _ = ts  # ignored
 
 
-def get_time_source() -> Optional[PlaybackTimeSource]:
-    return _time_source
+def get_time_source() -> WSTimeSource:
+    """Return the process-wide WS time source singleton."""
+    return get_ws_time_source()
 
 
 def set_game_time_observer(callback: Optional[Callable[[int, int], None]]) -> None:
@@ -46,45 +48,37 @@ def set_game_time_observer(callback: Optional[Callable[[int, int], None]]) -> No
 
 
 def get_game_time() -> GameTime:
-    """Capture the game window and return current ``GameTime(cycle, tick)``.
+    """Return current ``GameTime(cycle, tick)`` from the WS time feed.
 
-    Raises ``ErrorToLog`` if no time source has been installed (no calibration
-    available).  When the cost bar is momentarily undetectable (e.g., obscured
-    by the deploy UI), the last known (cycle, tick) is returned so callers in
-    bullet-time / frame-stepping loops continue working off the cached value.
+    When the feed has never delivered a message the caller gets ``GameTime(0,0)``;
+    callers that must gate on a live feed (e.g. ``AxisRunner.run``) should check
+    ``get_ws_time_source().is_connected()`` themselves at startup.
     """
-    ts = _time_source
-    if ts is None:
-        raise ErrorToLog("未初始化时间源，无法回放（需要先校准费用条）。")
-
-    frame = capture_game_window(ratio=None)
-    ts.update(frame)
-
-    cycle = ts.cycle_counter
-    tick = ts.current_tick if ts.current_tick is not None else 0
+    ws = get_ws_time_source()
+    gt = ws.get_game_time()
 
     observer = _game_time_observer
     if observer is not None:
         try:
-            observer(int(cycle), int(tick))
+            observer(int(gt.cycle), int(gt.tick))
         except Exception:
             logger.debug("game-time observer failed", exc_info=True)
 
-    return GameTime(cycle, tick)
+    return gt
 
 
 if __name__ == "__main__":
     import time as _time
-    from src.frame.calibration import find_calibration
 
-    std_w, std_h = imgconfig.SCREEN_STANDARD_SIZE
-    data = find_calibration(std_w, std_h)
-    if data is None:
-        logger.error("No calibration data available; cannot demo get_game_time().")
+    ws = get_ws_time_source()
+    ws.start()
+    GameTime.set_tick_max(30)
+    if not ws.wait_connected(timeout=5):
+        logger.error("WS time source not connected; cannot demo get_game_time().")
     else:
-        set_time_source(PlaybackTimeSource(data))
-        GameTime.apply_calibration(data)
         for _ in range(3):
             start = _time.time()
             gt = get_game_time()
             logger.info(f"Game time: {gt} ({(_time.time() - start) * 1000:.1f} ms)")
+            _time.sleep(0.5)
+    ws.stop()

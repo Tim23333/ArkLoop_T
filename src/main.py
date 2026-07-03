@@ -31,12 +31,11 @@ def _run_json(axis_file: str, debug: bool, autoenter: bool):
 def _run_excel(xlsm_file: str, debug: bool, autoenter: bool):
     """Run the legacy Excel-driven path."""
     from src.config import PerformActionConfig as actionconfig
-    from src.frame.calibration import find_calibration
     from src.logic.perform_action import perform_action, PerformLateError, UserPausedError
     from src.logic.calc_view import transform_map_to_view
     from src.logic.action import ActionType
     from src.logic.analyze_time import set_time_source
-    from src.logic.time_source import PlaybackTimeSource
+    from src.logic.ws_time_source import get_ws_time_source
     from src.cache import get_map_by_code, get_map_by_name
     from src.utils.error_to_log import ErrorToLog
     from src.logic.convert_pos import convert_position
@@ -64,18 +63,16 @@ def _run_excel(xlsm_file: str, debug: bool, autoenter: bool):
         bullet_threshold = excel.get_setting('bullet_threshold')
         frame_threshold = excel.get_setting('frame_threshold')
 
-        # Install playback time source from calibration before max_tick
-        # override.  Calibration is the source of truth for ticks-per-cycle;
-        # the Excel ``max_tick`` setting is kept only as a manual override.
-        std_w, std_h = imgconfig.SCREEN_STANDARD_SIZE
-        calib = find_calibration(std_w, std_h)
-        if calib is None:
-            raise ErrorToLog(f"未找到 {std_w}x{std_h} 的费用条校准，无法回放。")
-        GameTime.apply_calibration(calib)
-        set_time_source(PlaybackTimeSource(calib))
+        # Game time now comes from the WS time source (external game-memory
+        # reader); cost-bar calibration is no longer the time provider.  Start
+        # the singleton and refuse to run when the feed is unavailable.
+        ws = get_ws_time_source()
+        ws.start()
+        if not ws.wait_connected(timeout=5):
+            raise ErrorToLog("时间源 WS 未连接，无法回放。请启动游戏时间服务。")
+        set_time_source(ws)  # no-op compat; documents intent
+        GameTime.set_tick_max(max_tick if max_tick is not None else 30)
 
-        if max_tick is not None:
-            GameTime.set_tick_max(max_tick)
         if wait_time1 is not None:
             actionconfig.MINIMUM_WAITTIME = wait_time1
             logger.debug(f"Set minimum wait time to {actionconfig.MINIMUM_WAITTIME}")
@@ -217,14 +214,18 @@ def main(axis_file, xlsm_file, debug, autoenter, calibrate_flag):
         logger.setLevel(logging.WARNING)
 
     if calibrate_flag:
+        # Cost-bar calibration is vestigial now that the WS time source drives
+        # the time axis.  Kept for producing calibration files used by the
+        # offline video-analysis pipeline (offline_scanner / axis_writer).
         _run_calibration(num_cycles=6)
         return
 
+    # NOTE: time no longer requires cost-bar calibration (WS feed drives it).
+    # _run_json delegates to AxisRunner which starts the WS source itself;
+    # _run_excel starts the WS source directly.  No calibration preload needed.
     if axis_file:
-        _load_calibration_for_standard_resolution()
         _run_json(axis_file, debug, autoenter)
     elif xlsm_file:
-        _load_calibration_for_standard_resolution()
         _run_excel(xlsm_file, debug, autoenter)
     else:
         raise ValueError("Must provide either --axis or --xlsm")
