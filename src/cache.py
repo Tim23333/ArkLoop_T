@@ -74,7 +74,12 @@ def load_resource(
     resource_filename = resource_mapping[resource_name]
     filepaths = glob.glob(f"{resource_path}/*{resource_filename}*")
     if not filepaths:
-        logger.error(f"No resource found for name: {resource_name}")
+        # Expected for non-deployable summons (trap_*) / tokens (token_*):
+        # they're in the mapping but have no avatar file and never appear in
+        # the deploy bar.  The caller (AvatarMatcher._load_templates) catches
+        # FileNotFoundError and skips silently — log at DEBUG, not ERROR, so
+        # prewarm doesn't spam ~335 "missing resource" lines.
+        logger.debug(f"No resource file for name: {resource_name} ({resource_filename})")
         raise FileNotFoundError(f"No resource found for name: {resource_name}")
     try:
         return load_func(filepaths)

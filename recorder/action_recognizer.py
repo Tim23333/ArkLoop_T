@@ -294,6 +294,10 @@ class AvatarMatcher:
                 try:
                     templates[oper_name] = get_avatars(oper_name)
                 except Exception as exc:
+                    # Non-deployable summons (trap_*) / tokens (token_*) have no
+                    # avatar file and never appear in the deploy bar — the miss
+                    # is expected.  load_resource logs it at DEBUG so it doesn't
+                    # spam ERROR during prewarm.
                     if DebugConfig.LOG_RESOURCE_LOAD:
                         logger.debug(f"Could not load avatar for {oper_name}: {exc}")
             self._templates = templates
