@@ -17,6 +17,5 @@ six==1.17.0
 ttkbootstrap==1.10.1
 websocket-client>=1.7
 zipp==3.18.1
-# Optional GPU acceleration for avatar template matching (batched conv2d on
-# CUDA).  Omit to fall back to the CPU loop.
-torch>=2.2
+# Optional GPU acceleration for avatar template matching — see
+# requirements-gpu.txt.  Omit for a lighter CPU-only dev/build.

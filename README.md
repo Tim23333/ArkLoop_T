@@ -47,6 +47,10 @@ cd ArkLoop
 # 安装 Python 依赖
 .venv\Scripts\python -m pip install -r requirements.txt
 
+# （可选）GPU 加速头像模板匹配 —— 需 NVIDIA 显卡
+# 不装则用 CPU 匹配（结果一致，仅速度差异）。装后 EXE 体积会从 ~540MB 涨到 ~4.9GB。
+# .venv\Scripts\python -m pip install -r requirements-gpu.txt
+
 # 构建前端
 cd ui
 npm install

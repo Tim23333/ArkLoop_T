@@ -1,0 +1,16 @@
+# Optional GPU acceleration for avatar template matching.
+#
+# Installs PyTorch with CUDA — the avatar matcher then runs as a single
+# batched F.conv2d over all templates on the GPU (~8-10x faster per deploy:
+# ~270ms -> ~30ms on an RTX 2070).  Without this file, the matcher uses the
+# per-template cv2.matchTemplate CPU loop with identical results.
+#
+# Install on top of requirements.txt (or requirements_no_tesserocr.txt):
+#   .venv\Scripts\python -m pip install -r requirements-gpu.txt
+#
+# Requires an NVIDIA GPU + matching driver.  The PyTorch CUDA 12.1 wheel is
+# large (~2.5 GB), and bundling it in the EXE (build_arkloop.ps1) grows the
+# output from ~540 MB to ~4.9 GB.  The arkloop.spec collects torch
+# conditionally, so a CPU-only venv produces a CPU-only EXE automatically.
+torch>=2.2
+  --index-url https://download.pytorch.org/whl/cu121

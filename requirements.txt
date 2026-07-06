@@ -21,7 +21,6 @@ tesserocr==2.8.0
 ttkbootstrap==1.10.1
 websocket-client>=1.7
 zipp==3.18.1
-# Optional GPU acceleration for avatar template matching (batched conv2d on
-# CUDA).  The default Windows wheel ships CUDA runtime libs.  If omitted, the
-# matcher silently falls back to the CPU loop.
-torch>=2.2
+# Optional GPU acceleration for avatar template matching — see
+# requirements-gpu.txt.  Omit for a lighter CPU-only dev/build (the matcher
+# falls back to a per-template cv2.matchTemplate loop).
