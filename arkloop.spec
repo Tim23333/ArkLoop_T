@@ -1,6 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os, maa
-from PyInstaller.utils.hooks import collect_submodules, collect_data_files
+from PyInstaller.utils.hooks import (
+    collect_submodules,
+    collect_data_files,
+    collect_dynamic_libs,
+)
 
 maa_pkg_dir = os.path.dirname(maa.__file__)
 # Bundle the maa package directory wholesale.  PyInstaller picks up the .py
@@ -24,6 +28,26 @@ hiddenimports += collect_submodules('websocket')
 hiddenimports += collect_submodules('numpy._core')
 hiddenimports += collect_submodules('numpy.lib')
 
+# PyTorch (optional GPU avatar matching).  Collect submodules + data + dynamic
+# libs (CUDA runtime DLLs) so the batched conv2d works frozen.  Heavy: adds
+# ~1.5-2.5 GB.  If torch isn't installed, skip silently — the matcher falls
+# back to its CPU loop, so the bundle still works.
+try:
+    import torch as _torch  # noqa: F401
+    torch_hidden = collect_submodules('torch')
+    torch_datas = collect_data_files('torch', include_py_files=False)
+    torch_bins = collect_dynamic_libs('torch')
+    _torch_version = getattr(_torch, '__version__', '?')
+    print(f"[spec] collecting torch {_torch_version}: "
+          f"{len(torch_hidden)} submodules, {len(torch_datas)} data, "
+          f"{len(torch_bins)} libs")
+except Exception as _exc:
+    torch_hidden = []
+    torch_datas = []
+    torch_bins = []
+    print(f"[spec] torch not collected: {_exc}")
+hiddenimports += torch_hidden
+
 # Tesseract-OCR is optional: tesserocr has no Python 3.12 wheel and the live
 # pipeline degrades gracefully without it (pause-detection OCR only).  Only
 # bundle it + the tessdata runtime hook when the folder is staged at root.
@@ -37,7 +61,8 @@ datas = [
     ('config.example.json', '.'),
     ('src/maa/nodes',                  'src/maa/nodes'),    # MAA pipeline + OCR model weights
     ('src/maa/prts_plus_override.json', 'src/maa'),         # project-specific ROI overrides
-] + maa_datas
+] + maa_datas + torch_datas
+binaries = list(torch_bins)
 if _has_tesseract:
     datas.append(('Tesseract-OCR', 'Tesseract-OCR'))
 
@@ -46,7 +71,7 @@ runtime_hooks = ['pyi_rth_tessdata.py'] if _has_tesseract else []
 a = Analysis(
     ['scripts/arkloop_webview.py'],
     pathex=['.'],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],

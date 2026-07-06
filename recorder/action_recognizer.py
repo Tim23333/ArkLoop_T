@@ -263,11 +263,29 @@ class SemanticAction:
 
 
 class AvatarMatcher:
-    """Match a patch from the operator area against known avatar templates."""
+    """Match a patch from the operator area against known avatar templates.
+
+    When PyTorch + CUDA is available, matching runs as a single batched
+    ``F.conv2d`` over ALL templates on the GPU — one kernel instead of N
+    ``cv2.matchTemplate`` calls.  Otherwise it falls back to the original
+    per-template CPU loop.  The matching metric (TM_CCOEFF_NORMED) and the
+    threshold semantics are identical between the two paths.
+    """
 
     def __init__(self, threshold: float = imgconfig.TEMPLATE_MATCH_THRESHOLD):
         self.threshold = threshold
         self._templates: Optional[Dict[str, List[np.ndarray]]] = None
+        # Template (kernel) size — all avatars are cropped to AVATAR_CROP_SIZE.
+        self._th, self._tw = imgconfig.AVATAR_CROP_SIZE
+        # GPU batched-match state (built lazily on first match / prewarm).
+        self._torch = None
+        self._device = None
+        self._gpu_checked = False
+        self._gpu_ready = False
+        self._T_zm = None            # (N,1,th,tw) float32 zero-mean templates
+        self._norm_t = None          # (N,1,1)   float32 sqrt(sum((T-mean)^2))
+        self._ones = None            # (1,1,th,tw) ones kernel for local sums
+        self._templ_owner: List[str] = []  # operator name per template index
 
     def _load_templates(self) -> Dict[str, List[np.ndarray]]:
         if self._templates is None:
@@ -284,10 +302,144 @@ class AvatarMatcher:
     def prewarm(self) -> int:
         """Force template load up front (call from init_app to avoid the first
         deploy paying the full OPERATOR_MAPPING cv2.imread cost). Returns the
-        number of operators with at least one template loaded."""
+        number of operators with at least one template loaded.
+
+        Also stages the GPU tensors now so the first deploy doesn't pay the
+        one-time stacking/upload cost either.
+        """
         templates = self._load_templates()
+        if self._try_init_gpu():
+            self._ensure_gpu_tensors()
         return sum(1 for v in templates.values() if v)
 
+    # ------------------------------------------------------------------
+    # GPU batched matching (PyTorch + CUDA)
+    # ------------------------------------------------------------------
+    def _try_init_gpu(self) -> bool:
+        """Lazy-import torch and detect CUDA.  Returns True if the GPU path is usable.
+
+        Torch is optional: a missing import or no-CPU-only wheel simply keeps
+        the matcher on the original CPU loop.
+        """
+        if self._gpu_checked:
+            return self._gpu_ready
+        self._gpu_checked = True
+        try:
+            import torch  # noqa: F401
+            self._torch = torch
+            if not torch.cuda.is_available():
+                logger.info("AvatarMatcher: torch present but CUDA unavailable — CPU path")
+                return False
+            self._device = torch.device("cuda")
+            self._gpu_ready = True
+            logger.info("AvatarMatcher: CUDA available — batched GPU match enabled")
+        except Exception as exc:
+            logger.info(f"AvatarMatcher: torch unavailable ({exc!r}) — CPU path")
+        return self._gpu_ready
+
+    def _ensure_gpu_tensors(self) -> bool:
+        """Stack all templates into GPU tensors once.  Returns False if there is
+        nothing to match."""
+        if self._T_zm is not None:
+            return True
+        torch = self._torch
+        if torch is None or self._device is None:
+            return False
+        templates = self._load_templates()
+        owners: List[str] = []
+        templs: List[np.ndarray] = []
+        for name, tlist in templates.items():
+            for t in tlist:
+                if t is None or t.ndim != 2 or t.shape[0] < 1 or t.shape[1] < 1:
+                    continue
+                # All processed avatars are (th,tw); resize defensively in case a
+                # custom/skin variant slipped through at a different size.
+                if t.shape != (self._th, self._tw):
+                    t = cv2.resize(t, (self._tw, self._th))
+                templs.append(t)
+                owners.append(name)
+        if not templs:
+            return False
+        T = np.stack(templs).astype(np.float32)             # (N,th,tw)
+        T = torch.from_numpy(T).unsqueeze(1).to(self._device)  # (N,1,th,tw)
+        mean_t = T.mean(dim=(2, 3), keepdim=True)           # (N,1,1,1)
+        T_zm = T - mean_t                                    # zero-mean templates
+        # Shape (1,N,1,1) so it broadcasts against num=(1,N,Ho,Wo) without
+        # exploding into an N×N outer product.
+        self._norm_t = torch.sqrt((T_zm * T_zm).sum(dim=(2, 3))).view(1, -1, 1, 1)
+        self._ones = torch.ones(
+            (1, 1, self._th, self._tw), dtype=T.dtype, device=self._device
+        )
+        self._T_zm = T_zm
+        self._templ_owner = owners
+        logger.info(
+            f"AvatarMatcher: {len(owners)} templates staged on {self._device} "
+            f"({len(set(owners))} operators)"
+        )
+        return True
+
+    def _gpu_match(self, image_gray: np.ndarray) -> Tuple[Optional[str], float]:
+        """Batched TM_CCOEFF_NORMED of one image against all templates on GPU.
+
+        Implements the exact cv2 ``TM_CCOEFF_NORMED`` formula:
+            result = conv(I, T_zm) / ( sqrt(sum((I-μ_I)^2)) * sqrt(sum((T-μ_T)^2)) )
+        where ``T_zm = T - mean(T)`` and the patch-window stats come from a
+        local sum / sum-of-squares via a ones-kernel conv.
+        """
+        torch = self._torch
+        if image_gray.ndim == 3:
+            image_gray = cv2.cvtColor(image_gray, cv2.COLOR_BGR2GRAY)
+        h, w = image_gray.shape[:2]
+        if h < self._th or w < self._tw:
+            return None, 0.0
+        P = torch.from_numpy(image_gray.astype(np.float32))
+        P = P.unsqueeze(0).unsqueeze(0).to(self._device)    # (1,1,Hp,Wp)
+        k = float(self._th * self._tw)
+        # Local sum / sum-of-squares over the template window (for normalization).
+        S = torch.nn.functional.conv2d(P, self._ones)        # (1,1,Ho,Wo)
+        S2 = torch.nn.functional.conv2d(P * P, self._ones)
+        local_mean = S / k
+        local_var = (S2 / k) - local_mean * local_mean
+        norm_patch = torch.sqrt(local_var.clamp(min=0.0) * k)  # sqrt(sum((I-μ)^2))
+        # Numerator: cross-correlation with the zero-mean templates (one batched call).
+        num = torch.nn.functional.conv2d(P, self._T_zm)      # (1,N,Ho,Wo)
+        denom = norm_patch * self._norm_t                    # broadcast -> (1,N,Ho,Wo)
+        result = num / denom.clamp(min=1e-8)                 # TM_CCOEFF_NORMED ∈ [-1,1]
+        max_per_t = result.amax(dim=(2, 3)).squeeze(0)       # (N,) best per template
+        best_idx = int(max_per_t.argmax().item())
+        best_score = float(max_per_t[best_idx].item())
+        best_name = self._templ_owner[best_idx]
+        if best_score >= self.threshold:
+            return best_name, best_score
+        return None, best_score
+
+    # ------------------------------------------------------------------
+    # CPU fallback (original per-template loop)
+    # ------------------------------------------------------------------
+    def _cpu_match(
+        self, image_gray: np.ndarray, templates: Dict[str, List[np.ndarray]]
+    ) -> Tuple[Optional[str], float]:
+        best_name: Optional[str] = None
+        best_score = -1.0
+        for oper_name, avatar_list in templates.items():
+            for templ in avatar_list:
+                if templ.shape[0] > image_gray.shape[0] or templ.shape[1] > image_gray.shape[1]:
+                    continue
+                try:
+                    result = cv2.matchTemplate(image_gray, templ, cv2.TM_CCOEFF_NORMED)
+                except Exception:
+                    continue
+                _, max_val, _, _ = cv2.minMaxLoc(result)
+                if max_val > best_score:
+                    best_score = max_val
+                    best_name = oper_name
+        if best_score >= self.threshold and best_name is not None:
+            return best_name, float(best_score)
+        return None, float(best_score)
+
+    # ------------------------------------------------------------------
+    # Patch cropping + public match entry points
+    # ------------------------------------------------------------------
     def _crop_patch(
         self, frame: np.ndarray, center_ratio: Tuple[float, float]
     ) -> np.ndarray:
@@ -324,34 +476,26 @@ class AvatarMatcher:
         patch = self._crop_patch(frame, center_ratio)
         return self.match_patch(patch)
 
+    def _match_gray(self, image_gray: np.ndarray) -> Tuple[Optional[str], float]:
+        """Run the GPU batched match when available, else the CPU loop."""
+        templates = self._load_templates()
+        if not templates:
+            return None, 0.0
+        if image_gray.ndim == 3:
+            image_gray = cv2.cvtColor(image_gray, cv2.COLOR_BGR2GRAY)
+        if self._try_init_gpu() and self._ensure_gpu_tensors():
+            try:
+                return self._gpu_match(image_gray)
+            except Exception as exc:
+                logger.debug(f"GPU avatar match failed, falling back to CPU: {exc!r}")
+        return self._cpu_match(image_gray, templates)
+
     def match_patch(
         self,
         patch: np.ndarray,
     ) -> Tuple[Optional[str], float]:
         """Match a pre-cropped patch against known avatar templates."""
-        templates = self._load_templates()
-        if not templates:
-            return None, 0.0
-
-        best_name: Optional[str] = None
-        best_score = -1.0
-
-        for oper_name, avatar_list in templates.items():
-            for templ in avatar_list:
-                if templ.shape[0] > patch.shape[0] or templ.shape[1] > patch.shape[1]:
-                    continue
-                try:
-                    result = cv2.matchTemplate(patch, templ, cv2.TM_CCOEFF_NORMED)
-                except Exception:
-                    continue
-                _, max_val, _, _ = cv2.minMaxLoc(result)
-                if max_val > best_score:
-                    best_score = max_val
-                    best_name = oper_name
-
-        if best_score >= self.threshold and best_name is not None:
-            return best_name, float(best_score)
-        return None, float(best_score)
+        return self._match_gray(patch)
 
     def match_slot(
         self,
@@ -361,33 +505,10 @@ class AvatarMatcher:
 
         This is the search-style matching used by ``src/logic/locate_avatar``,
         but evaluated within one slot instead of the whole operator bar.
+        Functionally identical to ``match_patch`` (both delegate to the same
+        GPU/CPU path); kept as a separate name for call-site clarity.
         """
-        templates = self._load_templates()
-        if not templates:
-            return None, 0.0
-
-        if slot_image.ndim == 3:
-            slot_image = cv2.cvtColor(slot_image, cv2.COLOR_BGR2GRAY)
-
-        best_name: Optional[str] = None
-        best_score = -1.0
-
-        for oper_name, avatar_list in templates.items():
-            for templ in avatar_list:
-                if templ.shape[0] > slot_image.shape[0] or templ.shape[1] > slot_image.shape[1]:
-                    continue
-                try:
-                    result = cv2.matchTemplate(slot_image, templ, cv2.TM_CCOEFF_NORMED)
-                except Exception:
-                    continue
-                _, max_val, _, _ = cv2.minMaxLoc(result)
-                if max_val > best_score:
-                    best_score = max_val
-                    best_name = oper_name
-
-        if best_score >= self.threshold and best_name is not None:
-            return best_name, float(best_score)
-        return None, float(best_score)
+        return self._match_gray(slot_image)
 
 
 class ActionRecognizer:
