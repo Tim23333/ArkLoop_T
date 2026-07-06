@@ -18,6 +18,17 @@ function compareActionTime(a: AxisAction, b: AxisAction): number {
   return (a.tick ?? 0) - (b.tick ?? 0)
 }
 
+/** Format a game-time value (float seconds) as M:SS.cs for the live readout. */
+function formatGameTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '0:00.00'
+  const totalCs = Math.floor(seconds * 100)
+  const cs = totalCs % 100
+  const totalSec = Math.floor(totalCs / 100)
+  const s = totalSec % 60
+  const m = Math.floor(totalSec / 60)
+  return `${m}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`
+}
+
 /** Insert a single action into a chronologically sorted action list.
  *  Finds the last action whose (cycle, tick) <= the new action and places
  *  the new action right after it; if every action is later, it goes first.
@@ -566,6 +577,10 @@ export default function App() {
   // ── current cycle/tick from backend state ────────────────────
   const currentCycle = state?.current_cycle ?? 0
   const currentTick  = state?.current_tick  ?? 0
+  // ── live game time / frame count from the WS time source ─────
+  const gameTimeSec = state?.game_time_sec ?? 0
+  const frameCount  = state?.frame_count   ?? 0
+  const wsConnected = state?.ws_connected  ?? false
 
   // ── displayed axis ───────────────────────────────────────────
   const displayedAxis = useMemo(() => {
@@ -738,14 +753,27 @@ export default function App() {
           >
             自动进图: {autoEnter ? '开' : '关'}
           </button>
-          {/* Cycle/tick.  Idle: 全局费用 is an input that edits cycleOffset.
-              Live: it's a readout of the runner-reported value. */}
+          {/* Live game time + frame count from the WS time source.
+              Idle: also shows the 续录偏移 (cycleOffset) input for resume. */}
           <div className="flex items-center gap-4 text-xs font-mono">
-            <span className="text-text-dim flex items-center gap-1">
-              全局费用:
-              {isRecording || isPlaying ? (
-                <span className="text-text-primary">{currentCycle}</span>
-              ) : (
+            <span
+              className="text-text-dim flex items-center gap-1"
+              title="游戏实时时间（WS 时间源）"
+            >
+              游戏时间:
+              <span className={wsConnected ? 'text-text-primary' : 'text-text-dim'}>
+                {wsConnected ? formatGameTime(gameTimeSec) : '未连接'}
+              </span>
+            </span>
+            <span className="text-text-dim" title="游戏逻辑帧（WS 时间源）">
+              帧数:{' '}
+              <span className={wsConnected ? 'text-text-primary' : 'text-text-dim'}>
+                {wsConnected ? frameCount : '--'}
+              </span>
+            </span>
+            {!(isRecording || isPlaying) && (
+              <span className="text-text-dim flex items-center gap-1" title="续录/续播起始周期">
+                续录偏移:
                 <input
                   type="number"
                   min={0}
@@ -757,11 +785,8 @@ export default function App() {
                   title="编辑后下次录制/执行从这里开始"
                   className="w-14 bg-[#11161B] border border-border-panel rounded text-accent-blue text-xs font-mono px-1 py-0.5 focus:outline-none focus:border-accent-blue"
                 />
-              )}
-            </span>
-            <span className="text-text-dim">
-              帧: <span className={isRecording || isPlaying ? 'text-text-primary' : 'text-text-dim'}>{currentTick}</span>
-            </span>
+              </span>
+            )}
             {appendingTo && (
               <span className="text-accent-yellow text-xs">续录入: {appendingTo}</span>
             )}

@@ -132,13 +132,23 @@ export function useBackend() {
       if (event.event_type === 'state') {
         setState(event.data as BackendState)
       } else if (event.event_type === 'game_time') {
-        // Lightweight high-rate cycle/tick push — merge into state without
-        // discarding the heavier recognizer fields from the last full 'state'.
-        const gt = event.data as { cycle?: number; tick?: number }
+        // Lightweight high-rate cycle/tick + WS game_time/frame_count push —
+        // merge into state without discarding the heavier recognizer fields
+        // from the last full 'state'.
+        const gt = event.data as {
+          cycle?: number
+          tick?: number
+          game_time?: number
+          frame_count?: number
+          connected?: boolean
+        }
         setState((prev) => ({
           ...(prev ?? {}),
           current_cycle: gt.cycle ?? 0,
           current_tick: gt.tick ?? 0,
+          game_time_sec: gt.game_time ?? 0,
+          frame_count: gt.frame_count ?? 0,
+          ws_connected: gt.connected ?? false,
         }) as BackendState)
       } else if (event.event_type === 'axis') {
         setAxis((event.data as unknown as AxisAction[]) ?? [])

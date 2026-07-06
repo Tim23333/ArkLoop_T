@@ -25,6 +25,10 @@ export interface BackendState {
   queue_size?: number
   current_cycle?: number
   current_tick?: number
+  // Live game-time feed from the WebSocket time source.
+  game_time_sec?: number
+  frame_count?: number
+  ws_connected?: boolean
 }
 
 export interface OperatorInfo {
