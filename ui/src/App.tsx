@@ -9,13 +9,11 @@ import { OperatorSearchDialog } from './components/OperatorSearchDialog'
 import { ResizeHandles } from './components/ResizeHandles'
 import { useBackend } from './hooks/useBackend'
 import type { AxisAction, AxisBlock, ActionRow, OperatorInfo, RecognizerState } from './types'
-import type { TimelineSettings, Breakpoint, TimelinePreset } from './hooks/useBackend'
+import type { TimelineSettings, TimelinePreset } from './hooks/useBackend'
 import type { NewTimelineResult } from './components/NewTimelineDialog'
 
 function compareActionTime(a: AxisAction, b: AxisAction): number {
-  const cycleDiff = (a.cycle ?? 0) - (b.cycle ?? 0)
-  if (cycleDiff !== 0) return cycleDiff
-  return (a.tick ?? 0) - (b.tick ?? 0)
+  return (a.frame ?? 0) - (b.frame ?? 0)
 }
 
 /** Format a game-time value (float seconds) as M:SS.cs for the live readout. */
@@ -64,20 +62,19 @@ function insertActionsAtTime(actions: AxisAction[], group: AxisAction[]): AxisAc
   return next
 }
 
-/** Move every action that belongs to a timeline block to a new (cycle, tick)
+/** Move every action that belongs to a timeline block to a new frame
  *  and re-position the whole group in chronological order.
  */
-function moveBlockToTime(
+function moveBlockToFrame(
   actions: AxisAction[],
   block: AxisBlock,
-  newCycle: number,
-  newTick: number,
+  newFrame: number,
 ): AxisAction[] {
   const typeStr = block.row === 'deploy' ? '部署' : block.row === 'skill' ? '技能' : '撤退'
   const moving: AxisAction[] = []
   const remaining = actions.filter((a) => {
-    if (a.action_type === typeStr && a.cycle === block.cycle && a.tick === block.tick) {
-      moving.push({ ...a, cycle: newCycle, tick: newTick })
+    if (a.action_type === typeStr && a.frame === block.frame) {
+      moving.push({ ...a, frame: newFrame })
       return false
     }
     return true
@@ -88,8 +85,7 @@ function moveBlockToTime(
 interface EditDialogState {
   mode: 'add' | 'edit'
   row: ActionRow
-  cycle: number
-  tick: number
+  frame: number
   existingAction?: AxisAction
   blockIndex?: number  // index in loadedAxis for edit mode
 }
@@ -211,14 +207,14 @@ export default function App() {
       setSelectedTimeline(name)
       // Switching timeline drops any pending pause / resume state — including
       // the deployed set the backend would carry into a resume.
-      setCycleOffset(0)
+      setFrameOffset(0)
       setAppendingTo('')
       setRecognizerState({})
       void resetPlaybackState()
       try {
         const data = await loadTimeline(name)
         const actions = (data.actions as AxisAction[]) ?? []
-        actions.forEach((a) => { if (a.cycle == null) a.cycle = 0 })
+        actions.forEach((a) => { if (a.frame == null) a.frame = 0 })
         actions.sort((a, b) => compareActionTime(a, b))
         setLoadedAxis(actions)
         setTimelineSettings(data.settings ?? {})
@@ -236,7 +232,7 @@ export default function App() {
   const [pendingAxis, setPendingAxis] = useState<AxisAction[]>([])
 
   // Resume / pause coordination:
-  //   cycleOffset   — bias applied to the next record / play session.
+  //   frameOffset   — bias applied to the next record / play session.
   //                   Editable directly in the toolbar's 全局费用 input when
   //                   idle.  Pause writes the current cycle into it.
   //   appendingTo   — if non-empty, the next stop_recording silently appends
@@ -244,7 +240,7 @@ export default function App() {
   //   recognizerState — snapshot of the recognizer state machine at the
   //                     moment playback stopped/paused, used to warm up the
   //                     next recording session.
-  const [cycleOffset, setCycleOffset] = useState(0)
+  const [frameOffset, setFrameOffset] = useState(0)
   const [appendingTo, setAppendingTo] = useState<string>('')
   const [recognizerState, setRecognizerState] = useState<RecognizerState>({})
 
@@ -257,14 +253,14 @@ export default function App() {
       // treat the new recording as a continuation that appends to the same
       // timeline. This supports the "record after playback" flow where the
       // user wants to keep adding actions to the existing axis.
-      const isResume = !!selectedTimeline && (cycleOffset > 0 || loadedAxis.length > 0)
+      const isResume = !!selectedTimeline && (frameOffset > 0 || loadedAxis.length > 0)
       if (isResume) setAppendingTo(selectedTimeline)
       else setAppendingTo('')
       await startRecording(
         mapCode,
         timelineSettings.max_tick,
         timelineSettings.calibration_path,
-        cycleOffset,
+        frameOffset,
         isResume ? recognizerState : {},
         timelineSettings.devices,
       )
@@ -272,7 +268,7 @@ export default function App() {
     } catch (e) {
       console.error(e)
     }
-  }, [startRecording, timelineSettings, cycleOffset, selectedTimeline, loadedAxis.length, recognizerState])
+  }, [startRecording, timelineSettings, frameOffset, selectedTimeline, loadedAxis.length, recognizerState])
 
   const handleStop = useCallback(async () => {
     try {
@@ -284,7 +280,7 @@ export default function App() {
         await appendToTimeline(appendingTo, newActions)
         setLoadedAxis((prev) => [...prev, ...newActions])
         setAppendingTo('')
-        setCycleOffset(0)
+        setFrameOffset(0)
         setRecognizerState({})
       } else {
         setPendingAxis(newActions)
@@ -305,7 +301,7 @@ export default function App() {
         await appendToTimeline(selectedTimeline, newActions)
         setLoadedAxis((prev) => [...prev, ...newActions])
       }
-      setCycleOffset(result.cycle)
+      setFrameOffset(result.frame)
       setAppendingTo('')
     } catch (e) {
       console.error(e)
@@ -489,7 +485,7 @@ export default function App() {
       await startPlayback(
         selectedTimeline,
         autoEnter,
-        cycleOffset,
+        frameOffset,
         bps,
         timelineSettings.calibration_path,
       )
@@ -497,7 +493,7 @@ export default function App() {
     } catch (e) {
       console.error(e)
     }
-  }, [selectedTimeline, isPlaying, isRecording, autoEnter, startPlayback, cycleOffset, timelineSettings])
+  }, [selectedTimeline, isPlaying, isRecording, autoEnter, startPlayback, frameOffset, timelineSettings])
 
   const handleStopPlay = useCallback(async () => {
     try {
@@ -510,7 +506,7 @@ export default function App() {
     // deployed/recognizer state and rewind the resume offset so the next Play
     // / Record starts clean. (stop_playback already cleared the backend copy.)
     setRecognizerState({})
-    setCycleOffset(0)
+    setFrameOffset(0)
   }, [stopPlayback])
 
   const handlePausePlay = useCallback(async () => {
@@ -521,7 +517,7 @@ export default function App() {
     }
     // setIsPlaying(false) will be applied by the 'paused' / 'playback_done'
     // event handler below.  We also snapshot the latest cycle into offset.
-    setCycleOffset((c) => state?.current_cycle ?? c)
+    setFrameOffset((c) => state?.frame_count ?? c)
   }, [pausePlayback, state])
 
   // Dispatch Pause to whichever session is active.
@@ -534,7 +530,7 @@ export default function App() {
   const breakpoints = timelineSettings.breakpoints ?? []
 
   const updateBreakpoints = useCallback(
-    async (next: Breakpoint[]) => {
+    async (next: number[]) => {
       setTimelineSettings((prev) => ({ ...prev, breakpoints: next }))
       if (selectedTimeline) {
         await saveBreakpoints(selectedTimeline, next).catch(() => {})
@@ -544,16 +540,16 @@ export default function App() {
   )
 
   const handleAddBreakpoint = useCallback(
-    (cycle: number, tick: number) => {
-      if (breakpoints.some((b) => b.cycle === cycle && b.tick === tick)) return
-      void updateBreakpoints([...breakpoints, { cycle, tick }].sort((a, b) => (a.cycle - b.cycle) || (a.tick - b.tick)))
+    (frame: number) => {
+      if (breakpoints.includes(frame)) return
+      void updateBreakpoints([...breakpoints, frame].sort((a, b) => a - b))
     },
     [breakpoints, updateBreakpoints],
   )
 
   const handleRemoveBreakpoint = useCallback(
-    (cycle: number, tick: number) => {
-      void updateBreakpoints(breakpoints.filter((b) => !(b.cycle === cycle && b.tick === tick)))
+    (frame: number) => {
+      void updateBreakpoints(breakpoints.filter((f) => f !== frame))
     },
     [breakpoints, updateBreakpoints],
   )
@@ -567,33 +563,24 @@ export default function App() {
         event_type?: string
         data?: {
           source?: string
-          cycle?: number
-          tick?: number
+          frame?: number
           state?: RecognizerState
         }
       }
       if (ev?.event_type === 'playback_done') {
         setIsPlaying(false)
-        // After playback finishes, lock the global cycle and recognizer state
-        // so the next recording can continue appending to the same timeline
-        // with the same deployed/selected operator knowledge.
-        if (typeof ev.data?.cycle === 'number') setCycleOffset(ev.data.cycle)
+        if (typeof ev.data?.frame === 'number') setFrameOffset(ev.data.frame)
         if (ev.data?.state) setRecognizerState(ev.data.state as RecognizerState)
       } else if (ev?.event_type === 'paused') {
-        // Source: 'playback' (breakpoint or pause) or 'recording'. Either way
-        // mark the matching session idle and adopt the reported cycle offset.
         if (ev.data?.source === 'playback') setIsPlaying(false)
         if (ev.data?.source === 'recording') setIsRecording(false)
-        if (typeof ev.data?.cycle === 'number') setCycleOffset(ev.data.cycle)
+        if (typeof ev.data?.frame === 'number') setFrameOffset(ev.data.frame)
         if (ev.data?.state) setRecognizerState(ev.data.state as RecognizerState)
       }
     }
     return () => { window.__onBackendEvent = prev }
   }, [])
 
-  // ── current cycle/tick from backend state ────────────────────
-  const currentCycle = state?.current_cycle ?? 0
-  const currentTick  = state?.current_tick  ?? 0
   // ── live game time / frame count from the WS time source ─────
   const gameTimeSec = state?.game_time_sec ?? 0
   const frameCount  = state?.frame_count   ?? 0
@@ -602,21 +589,16 @@ export default function App() {
   // ── displayed axis ───────────────────────────────────────────
   const displayedAxis = useMemo(() => {
     if (isRecording) {
-      // When resuming a recording (cycleOffset > 0), merge previously saved
+      // When resuming a recording (frameOffset > 0), merge previously saved
       // actions with the live backend stream so the timeline shows the full
       // axis instead of only the current recording session.
-      if (cycleOffset > 0 && loadedAxis.length > 0) {
+      if (frameOffset > 0 && loadedAxis.length > 0) {
         return [...loadedAxis, ...backendAxis]
       }
       return backendAxis
     }
     return loadedAxis
-  }, [isRecording, backendAxis, loadedAxis, cycleOffset])
-
-  const maxTick = useMemo(() => {
-    const v = timelineSettings.max_tick
-    return typeof v === 'number' && v > 0 ? v : 30
-  }, [timelineSettings])
+  }, [isRecording, backendAxis, loadedAxis, frameOffset])
 
   // Unique operator names deployed in the current timeline, in first-seen
   // order.  Derived from displayedAxis so it updates live during recording
@@ -658,29 +640,27 @@ export default function App() {
     }
   }, [selectedTimeline, saveTimeline, timelineSettings])
 
-  const handleAddAction = useCallback((row: ActionRow, cycle: number, tick: number) => {
+  const handleAddAction = useCallback((row: ActionRow, frame: number) => {
     if (isRecording || isPlaying) return
-    setEditDialog({ mode: 'add', row, cycle, tick })
+    setEditDialog({ mode: 'add', row, frame })
   }, [isRecording, isPlaying])
 
   const handleEditAction = useCallback((block: AxisBlock) => {
     if (isRecording || isPlaying) return
-    // Find first action in block for editing
     const action = block.actions[0]
     if (!action) return
     setEditDialog({
       mode: 'edit',
       row: block.row,
-      cycle: block.cycle,
-      tick: block.tick,
+      frame: block.frame,
       existingAction: action,
     })
   }, [isRecording, isPlaying])
 
-  const handleMoveAction = useCallback(async (block: AxisBlock, newCycle: number, newTick: number) => {
+  const handleMoveAction = useCallback(async (block: AxisBlock, newFrame: number) => {
     if (isRecording || isPlaying) return
-    if (block.cycle === newCycle && block.tick === newTick) return
-    const newAxis = moveBlockToTime(loadedAxis, block, newCycle, newTick)
+    if (block.frame === newFrame) return
+    const newAxis = moveBlockToFrame(loadedAxis, block, newFrame)
     await saveAxis(newAxis)
   }, [isRecording, isPlaying, loadedAxis, saveAxis])
 
@@ -688,7 +668,7 @@ export default function App() {
     if (isRecording || isPlaying) return
     const typeStr = block.row === 'deploy' ? '部署' : block.row === 'skill' ? '技能' : '撤退'
     const newAxis = loadedAxis.filter(
-      (a) => !(a.action_type === typeStr && a.cycle === block.cycle && a.tick === block.tick)
+      (a) => !(a.action_type === typeStr && a.frame === block.frame)
     )
     await saveAxis(newAxis)
   }, [isRecording, isPlaying, loadedAxis, saveAxis])
@@ -697,17 +677,14 @@ export default function App() {
     if (!editDialog) return
     let newAxis: AxisAction[]
     if (editDialog.mode === 'add') {
-      // Insert at the correct chronological position so a newly added action
-      // with an earlier cycle/tick still lands before later actions.
       newAxis = insertActionSorted(loadedAxis, action)
     } else {
-      // Replace matching action (same row+cycle+tick as the dialog opened with).
       const typeStr = editDialog.row === 'deploy' ? '部署' : editDialog.row === 'skill' ? '技能' : '撤退'
-      const timeChanged = action.cycle !== editDialog.cycle || action.tick !== editDialog.tick
+      const timeChanged = action.frame !== editDialog.frame
       if (!timeChanged) {
         let replaced = false
         newAxis = loadedAxis.map((a) => {
-          if (!replaced && a.action_type === typeStr && a.cycle === editDialog.cycle && a.tick === editDialog.tick) {
+          if (!replaced && a.action_type === typeStr && a.frame === editDialog.frame) {
             replaced = true
             return action
           }
@@ -715,10 +692,9 @@ export default function App() {
         })
         if (!replaced) newAxis = insertActionSorted(loadedAxis, action)
       } else {
-        // Time was edited: remove the old action and re-insert in sorted order.
         let removed = false
         const remaining = loadedAxis.filter((a) => {
-          if (!removed && a.action_type === typeStr && a.cycle === editDialog.cycle && a.tick === editDialog.tick) {
+          if (!removed && a.action_type === typeStr && a.frame === editDialog.frame) {
             removed = true
             return false
           }
@@ -759,9 +735,6 @@ export default function App() {
           wsFrameCount={frameCount}
           wsConnected={wsConnected}
           wsMemOk={state?.ws_mem_ok ?? false}
-          wsCycle={state?.current_cycle ?? 0}
-          wsTick={state?.current_tick ?? 0}
-          wsTickMax={maxTick}
         />
       </div>
 
@@ -780,7 +753,7 @@ export default function App() {
             自动进图: {autoEnter ? '开' : '关'}
           </button>
           {/* Live game time + frame count from the WS time source.
-              Idle: also shows the 续录偏移 (cycleOffset) input for resume. */}
+              Idle: also shows the 续录偏移 (frameOffset) input for resume. */}
           <div className="flex items-center gap-4 text-xs font-mono">
             <span
               className="text-text-dim flex items-center gap-1"
@@ -803,10 +776,10 @@ export default function App() {
                 <input
                   type="number"
                   min={0}
-                  value={cycleOffset}
+                  value={frameOffset}
                   onChange={(e) => {
                     const v = parseInt(e.target.value, 10)
-                    setCycleOffset(Number.isFinite(v) && v >= 0 ? v : 0)
+                    setFrameOffset(Number.isFinite(v) && v >= 0 ? v : 0)
                   }}
                   title="编辑后下次录制/执行从这里开始"
                   className="w-14 bg-[#11161B] border border-border-panel rounded text-accent-blue text-xs font-mono px-1 py-0.5 focus:outline-none focus:border-accent-blue"
@@ -842,9 +815,6 @@ export default function App() {
           recording={isRecording}
           playing={isPlaying}
           currentFrame={frameCount}
-          currentCycle={currentCycle}
-          currentTick={currentTick}
-          maxTick={maxTick}
           breakpoints={breakpoints}
           getAvatarUrl={getAvatarUrl}
           isLoading={isLoading}
@@ -888,8 +858,7 @@ export default function App() {
         <OperatorSearchDialog
           mode={editDialog.mode}
           row={editDialog.row}
-          targetCycle={editDialog.cycle}
-          targetTick={editDialog.tick}
+          targetFrame={editDialog.frame}
           existingAction={editDialog.existingAction}
           operators={operatorList}
           getAvatarUrl={getAvatarUrl}

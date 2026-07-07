@@ -293,7 +293,7 @@ export function NewTimelineDialog({
               '读取校准信息中…'
             ) : (
               <>
-                费用周期 tick 数：<span className="text-text-primary font-mono">{maxTick}</span>
+                max_tick（兼容旧格式）：<span className="text-text-primary font-mono">{maxTick}</span>
               </>
             )}
           </div>

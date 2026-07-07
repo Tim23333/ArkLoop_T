@@ -6,18 +6,13 @@ import { blockKey } from './ChevronBlock'
 import { useTimelineLayout, DEFAULT_LAYOUT } from '../hooks/useTimelineLayout'
 import type { AxisAction, AxisBlock, ActionRow } from '../types'
 import type { TickPosition } from '../hooks/useTimelineLayout'
-import type { Breakpoint } from '../hooks/useBackend'
 
 interface TimelineProps {
   actions?: AxisAction[]
   recording?: boolean
   playing?: boolean
-  /** Current absolute frame count from the WS time source. */
   currentFrame?: number
-  currentCycle?: number
-  currentTick?: number
-  maxTick?: number
-  breakpoints?: Breakpoint[]
+  breakpoints?: number[]
   getAvatarUrl?: (oper: string) => Promise<string>
   isLoading?: boolean
   onRecord?: () => void
@@ -25,37 +20,29 @@ interface TimelineProps {
   onPlay?: () => void
   onStopPlay?: () => void
   onPause?: () => void
-  onAddAction?: (row: ActionRow, cycle: number, tick: number) => void
+  onAddAction?: (row: ActionRow, frame: number) => void
   onEditAction?: (block: AxisBlock) => void
-  onMoveAction?: (block: AxisBlock, newCycle: number, newTick: number) => void
+  onMoveAction?: (block: AxisBlock, newFrame: number) => void
   onDeleteAction?: (block: AxisBlock) => void
-  onAddBreakpoint?: (cycle: number, tick: number) => void
-  onRemoveBreakpoint?: (cycle: number, tick: number) => void
+  onAddBreakpoint?: (frame: number) => void
+  onRemoveBreakpoint?: (frame: number) => void
 }
 
 type ContextMenuState =
   | { kind: 'block'; x: number; y: number; block: AxisBlock }
-  | { kind: 'empty'; x: number; y: number; cycle: number; tick: number }
-  | { kind: 'breakpoint'; x: number; y: number; cycle: number; tick: number }
+  | { kind: 'empty'; x: number; y: number; frame: number }
+  | { kind: 'breakpoint'; x: number; y: number; frame: number }
 
 const TOP_BAR_HEIGHT = 43
 const ROW_COUNT = 3
-// Fixed viewport position of the playhead within the scroll area (pixels from its left edge)
 const PLAYHEAD_VIEWPORT_X = 160
-// We pre-render the timeline in chunks of this many cycles so the layout memo
-// stays stable while the playhead moves — it only recomputes once per chunk,
-// never per tick. Also the minimum amount of empty timeline you can always
-// scroll/edit into, even on a brand-new empty timeline.
-const CHUNK_CYCLES = 10
+const CHUNK_FRAMES = 300  // pre-render 300 frames at a time
 
 export function Timeline({
   actions = [],
   recording = false,
   playing = false,
   currentFrame = 0,
-  currentCycle: _currentCycle = 0,
-  currentTick: _currentTick = 0,
-  maxTick = DEFAULT_LAYOUT.maxTick,
   breakpoints = [],
   getAvatarUrl,
   isLoading = false,
@@ -77,47 +64,31 @@ export function Timeline({
   const panStart = useRef({ x: 0, scrollLeft: 0 })
   const liveMode = recording || playing
 
-  // Editing state
   const [selectedBlockKey, setSelectedBlockKey] = useState<string | null>(null)
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
 
-  // Drag state
   const [draggingBlock, setDraggingBlock] = useState<AxisBlock | null>(null)
   const [dragX, setDragX] = useState(0)
 
-  // How far the user has scrolled the timeline open, in extra chunks. Grows when
-  // the user scrolls near the right edge → effectively infinite for editing.
   const [scrollChunks, setScrollChunks] = useState(1)
 
-  // Derive cycle from frame_count for chunk-based pre-rendering.
-  const derivedCycle = Math.floor(currentFrame / (maxTick || 1))
-  // Render up to this cycle. Quantized to CHUNK_CYCLES so the layout memo only
-  // recomputes once per chunk (pre-render), not on every tick of the playhead.
-  const liveChunkCycle = liveMode
-    ? (Math.floor(derivedCycle / CHUNK_CYCLES) + 2) * CHUNK_CYCLES
+  // Pre-render in chunks of CHUNK_FRAMES so the layout memo stays stable.
+  const liveChunkFrame = liveMode
+    ? (Math.floor(currentFrame / CHUNK_FRAMES) + 2) * CHUNK_FRAMES
     : 0
-  const extendToCycle = Math.max(scrollChunks * CHUNK_CYCLES, liveChunkCycle)
+  const extendToFrame = Math.max(scrollChunks * CHUNK_FRAMES, liveChunkFrame)
 
-  // Layout — pre-rendered well ahead of both the live playhead and the scroll edge
-  const { ticks, blocks, totalWidth } = useTimelineLayout(
-    actions,
-    { maxTick },
-    extendToCycle,
-  )
+  const { ticks, blocks, totalWidth } = useTimelineLayout(actions, {}, extendToFrame)
 
-  // Current tick position in content space. The WS time source pushes
-  // frame_count at ~125 Hz; the playhead tracks the absolute frame.
   const playheadTick = ticks.find((t) => t.frame === currentFrame)
   const playheadContentX = playheadTick?.x ?? 0
 
-  // ── Keep the playhead at PLAYHEAD_VIEWPORT_X: scroll the content under it ──
   useEffect(() => {
     if (!liveMode || !scrollRef.current) return
     scrollRef.current.scrollLeft = Math.max(0, playheadContentX - PLAYHEAD_VIEWPORT_X)
   }, [currentFrame, liveMode, playheadContentX])
 
-  // ── Grow the timeline when the user scrolls near the right edge ─────
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
@@ -126,10 +97,6 @@ export function Timeline({
     }
   }, [])
 
-  // Measure track height — useLayoutEffect runs before paint, avoiding one frame
-  // where containerHeight=0 initial would render an empty SVG, and more importantly
-  // preventing the initial containerHeight=180 from clipping the retreat row under
-  // overflow-y:hidden before the scrollbar-adjusted clientHeight is known.
   useLayoutEffect(() => {
     const el = scrollRef.current
     if (!el) return
@@ -143,7 +110,6 @@ export function Timeline({
 
   const rowHeight = containerHeight / ROW_COUNT
 
-  // Close context menu on outside click
   useEffect(() => {
     if (!contextMenu) return
     const close = (e: MouseEvent) => {
@@ -155,7 +121,6 @@ export function Timeline({
     return () => document.removeEventListener('mousedown', close)
   }, [contextMenu])
 
-  // Del / Backspace deletes selected block
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedBlockKey && !contextMenu) {
@@ -168,7 +133,6 @@ export function Timeline({
     return () => window.removeEventListener('keydown', handler)
   }, [selectedBlockKey, blocks, contextMenu, onDeleteAction])
 
-  // ── Panning ─────────────────────────────────────────────────────────
   const startPan = (e: React.MouseEvent) => {
     if (draggingBlock || liveMode) return
     setIsPanning(true)
@@ -192,13 +156,12 @@ export function Timeline({
         (best, t) => best === null || Math.abs(t.x - x) < Math.abs(best.x - x) ? t : best,
         null,
       )
-      if (nearest) onMoveAction?.(draggingBlock, nearest.cycle, nearest.tick)
+      if (nearest) onMoveAction?.(draggingBlock, nearest.frame)
       setDraggingBlock(null)
     }
     setIsPanning(false)
   }, [draggingBlock, ticks, onMoveAction])
 
-  // ── Block interaction handlers ───────────────────────────────────────
   const handleBlockClick = useCallback((block: AxisBlock) => {
     setSelectedBlockKey(blockKey(block))
     setContextMenu(null)
@@ -217,17 +180,14 @@ export function Timeline({
       setDragX(e.clientX - rect.left + scrollRef.current.scrollLeft)
     }
   }, [])
-  const handleTrackDoubleClick = useCallback((row: ActionRow, cycle: number, tick: number) => {
-    onAddAction?.(row, cycle, tick)
+  const handleTrackDoubleClick = useCallback((row: ActionRow, frame: number) => {
+    onAddAction?.(row, frame)
   }, [onAddAction])
   const handleSvgClick = useCallback(() => {
     setSelectedBlockKey(null)
     setContextMenu(null)
   }, [])
 
-  // Right-click on the empty timeline area: offer "add breakpoint" at the
-  // nearest tick. Note: this fires only when the click does NOT land on a
-  // block (block onContextMenu calls stopPropagation up the chain).
   const handleEmptyContextMenu = useCallback((e: React.MouseEvent) => {
     if (liveMode) return
     if (!scrollRef.current) return
@@ -239,12 +199,11 @@ export function Timeline({
       null,
     )
     if (!nearest) return
-    // Check if a breakpoint already exists there → show "remove" instead.
-    const existing = breakpoints.find((b) => b.cycle === nearest.cycle && b.tick === nearest.tick)
+    const existing = breakpoints.find((f) => f === nearest.frame)
     setContextMenu(
-      existing
-        ? { kind: 'breakpoint', x: e.clientX, y: e.clientY, cycle: existing.cycle, tick: existing.tick }
-        : { kind: 'empty', x: e.clientX, y: e.clientY, cycle: nearest.cycle, tick: nearest.tick },
+      existing !== undefined
+        ? { kind: 'breakpoint', x: e.clientX, y: e.clientY, frame: existing }
+        : { kind: 'empty', x: e.clientX, y: e.clientY, frame: nearest.frame },
     )
   }, [liveMode, ticks, breakpoints])
 
@@ -269,7 +228,6 @@ export function Timeline({
       className="relative flex-1 min-h-[180px] bg-gradient-to-br from-timeline-bg to-timeline-bg-end flex select-none outline-none"
       tabIndex={-1}
     >
-      {/* ── Fixed left column ── */}
       <div className="w-timeline-left shrink-0 flex flex-col z-20 bg-gradient-to-br from-timeline-bg to-timeline-bg-end border-r border-grid-light">
         <div className="h-[43px] shrink-0 flex items-center px-5 bg-timeline-top border-b border-grid-light">
           <TransportControls
@@ -296,7 +254,6 @@ export function Timeline({
         </div>
       </div>
 
-      {/* ── Right scrollable area ── */}
       <div
         ref={scrollRef}
         className="flex-1 overflow-x-auto overflow-y-hidden relative"
@@ -309,12 +266,10 @@ export function Timeline({
         onContextMenu={handleEmptyContextMenu}
       >
         <div className="relative min-h-full" style={{ minWidth: innerWidth }}>
-          {/* Ruler */}
           <div className="h-[43px] bg-timeline-top border-b border-grid-light relative">
-            <Ruler ticks={ticks} maxTick={maxTick} leftMargin={0} />
+            <Ruler ticks={ticks} leftMargin={0} />
           </div>
 
-          {/* Tracks */}
           <svg
             width={innerWidth}
             height={containerHeight}
@@ -342,29 +297,19 @@ export function Timeline({
 
           <div className="absolute top-[43px] left-0 right-0 h-px bg-highlight opacity-70 pointer-events-none" />
 
-          {/* ── Breakpoint markers: dashed yellow line at each breakpoint's
-              tick position. Sits inside the tracks area (below the ruler) so
-              it never overlaps the cost-bar. Left-click opens a delete menu.
-              The wider invisible hit-strip makes the thin line easy to click. */}
           {breakpoints.map((bp) => {
-            const t = ticks.find((tp) => tp.cycle === bp.cycle && tp.tick === bp.tick)
+            const t = ticks.find((tp) => tp.frame === bp)
             if (!t) return null
             return (
               <div
-                key={`bp-${bp.cycle}-${bp.tick}`}
+                key={`bp-${bp}`}
                 className="absolute z-[5] cursor-pointer"
                 style={{ top: TOP_BAR_HEIGHT, bottom: 0, left: t.x - 6, width: 12 }}
                 onMouseDown={(e) => {
                   if (e.button !== 0) return
                   if (liveMode) return
                   e.stopPropagation()
-                  setContextMenu({
-                    kind: 'breakpoint',
-                    x: e.clientX,
-                    y: e.clientY,
-                    cycle: bp.cycle,
-                    tick: bp.tick,
-                  })
+                  setContextMenu({ kind: 'breakpoint', x: e.clientX, y: e.clientY, frame: bp })
                 }}
               >
                 <svg width="12" height="100%" className="pointer-events-none">
@@ -382,11 +327,6 @@ export function Timeline({
             )
           })}
 
-          {/* ── Playhead: in content space at the current (cycle,tick). The
-              auto-scroll effect keeps it pinned at a fixed viewport position
-              during recording/playback; idle it sits at the real position.
-              Aligned to the deploy row top so it doesn't reach into the
-              cost-bar ruler. */}
           <div
             className="absolute pointer-events-none z-10"
             style={{ top: TOP_BAR_HEIGHT, bottom: 0, left: playheadContentX - 4, width: 9 }}
@@ -408,15 +348,11 @@ export function Timeline({
         </div>
       </div>
 
-      {/* Context menu */}
       {contextMenu && (
         <div
           ref={contextMenuRef}
           className="fixed z-[9999] min-w-[80px] rounded border border-border-panel bg-[#1A1E24] shadow-xl py-0.5 text-xs"
           style={(() => {
-            // Flip upward if the menu would overflow the viewport bottom.
-            // 'block' has 2 items (~56px); others have 1 (~28px). Use 70px as
-            // a safe upper bound so the menu never clips off-screen.
             const estimatedH = contextMenu.kind === 'block' ? 70 : 40
             const flipY = contextMenu.y + estimatedH > window.innerHeight
             return {
@@ -454,7 +390,7 @@ export function Timeline({
             <button
               className="w-full text-left px-3 py-1.5 text-text-muted hover:bg-[#222A31] hover:text-accent-yellow whitespace-nowrap"
               onClick={() => {
-                onAddBreakpoint?.(contextMenu.cycle, contextMenu.tick)
+                onAddBreakpoint?.(contextMenu.frame)
                 setContextMenu(null)
               }}
             >
@@ -465,7 +401,7 @@ export function Timeline({
             <button
               className="w-full text-left px-3 py-1.5 text-text-muted hover:bg-[#222A31] hover:text-accent-red whitespace-nowrap"
               onClick={() => {
-                onRemoveBreakpoint?.(contextMenu.cycle, contextMenu.tick)
+                onRemoveBreakpoint?.(contextMenu.frame)
                 setContextMenu(null)
               }}
             >

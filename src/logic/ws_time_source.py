@@ -21,7 +21,6 @@ import time
 from typing import Any, Dict, Optional, Tuple
 
 from src.logger import logger
-from src.logic.game_time import GameTime
 
 try:
     import websocket  # from the `websocket-client` package
@@ -217,16 +216,15 @@ class WSTimeSource:
             self._stop.wait(0.05)
         return self.is_connected()
 
-    def get_game_time(self) -> GameTime:
-        """Decompose the latest ``frame_count`` into ``GameTime(cycle, tick)``.
+    def get_game_time(self) -> int:
+        """Return the latest absolute ``frame_count`` from the WS feed.
 
         Returns the last known value when the feed is briefly interrupted so
         callers in bullet-time / frame-stepping loops keep working off a cached
         reading rather than crashing.
         """
         frame_count, _game_time, _mem_ok = self.latest()
-        tick_max = GameTime.get_tick_max() or 1
-        return GameTime(frame_count // tick_max, frame_count % tick_max)
+        return int(frame_count)
 
     def status(self) -> Dict[str, Any]:
         """Snapshot for the UI: connection + latest reading + configured URL."""

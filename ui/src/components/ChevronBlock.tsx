@@ -169,6 +169,6 @@ export function ChevronBlock({
   )
 }
 
-export function blockKey(b: { row: string; cycle: number; tick: number }) {
-  return `${b.row}:${b.cycle}:${b.tick}`
+export function blockKey(b: { row: string; frame: number }) {
+  return `${b.row}:${b.frame}`
 }

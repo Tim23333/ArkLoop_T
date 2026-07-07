@@ -74,7 +74,6 @@ from recorder.backend import ActionBackend, write_axis_json
 from recorder.action_recognizer import AvatarMatcher
 from src.cache import OPERATOR_MAPPING
 from src.logger import logger
-from src.logic.game_time import GameTime
 from src.logic.ws_time_source import DEFAULT_WS_URL, get_ws_time_source
 
 try:
@@ -98,7 +97,7 @@ class ArkLoopApi:
         # Playback
         self._playback_thread: Optional[threading.Thread] = None
         self._playback_stop = threading.Event()
-        self._last_playback_cycle: int = 0
+        self._last_playback_frame: int = 0
         self._last_playback_state: Dict[str, Any] = {}
         self._mouse_debug = mouse_debug
         # True when the most recent playback breakpoint left the game paused
@@ -115,7 +114,7 @@ class ArkLoopApi:
         max_tick: Optional[int] = None,
         calibration_path: Optional[str] = None,
         fake_avatar: bool = False,
-        cycle_offset: int = 0,
+        frame_offset: int = 0,
         recognizer_state: Optional[Dict[str, Any]] = None,
         devices: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
@@ -126,8 +125,7 @@ class ArkLoopApi:
             # If the previous playback (or user click) paused the game via
             # the esc menu (wait_until_threshold's esc() call), close that
             # menu so recording observes a live game rather than a frozen
-            # menu overlay. perform_action's first action handles this for
-            # playback resume, but recording has no equivalent indirection.
+            # menu overlay.
             if self._game_paused_by_runner:
                 try:
                     from src.mumu.mumu_controller import esc as game_esc
@@ -143,7 +141,7 @@ class ArkLoopApi:
                 calibration_path=Path(calibration_path) if calibration_path else None,
                 event_callback=self._on_backend_event,
                 fake_avatar=fake_avatar,
-                cycle_offset=int(cycle_offset or 0),
+                frame_offset=int(frame_offset or 0),
                 recognizer_state=recognizer_state,
                 devices=devices,
                 _matcher=self._cached_matcher,
@@ -151,7 +149,7 @@ class ArkLoopApi:
                 mouse_debug=self._mouse_debug,
             ).start()
             logger.info(
-                f"[recording] started cycle_offset={cycle_offset} "
+                f"[recording] started frame_offset={frame_offset} "
                 f"recognizer_state={recognizer_state} devices={devices}"
             )
 
@@ -164,24 +162,23 @@ class ArkLoopApi:
         self._push_event("axis", axis)
         return axis
 
-    def pause_recording(self) -> Dict[str, int]:
-        """Stop the recorder and return the (cycle, tick) at pause time.
+    def pause_recording(self) -> Dict[str, Any]:
+        """Stop the recorder and return the frame at pause time.
 
-        Used by the frontend Pause button: caller then sets cycle_offset for
+        Used by the frontend Pause button: caller then sets frame_offset for
         the next session.  Emits a 'paused' event so the UI can also pick it
         up out-of-band.
         """
         with self._lock:
             if self.backend is None:
-                return {"cycle": 0, "tick": 0}
-            gt = self.backend.latest_game_time or {"cycle": 0, "tick": 0}
+                return {"frame": 0}
+            gt = self.backend.latest_game_time or {"frame": 0}
             axis = self.backend.stop()
             self.backend = None
-        cycle = int(gt.get("cycle", 0))
-        tick = int(gt.get("tick", 0))
+        frame = int(gt.get("frame", 0))
         self._push_event("axis", axis)
-        self._push_event("paused", {"source": "recording", "cycle": cycle, "tick": tick})
-        return {"cycle": cycle, "tick": tick, "axis": axis}
+        self._push_event("paused", {"source": "recording", "frame": frame})
+        return {"frame": frame, "axis": axis}
 
     # ------------------------------------------------------------------
     # Queries
@@ -837,15 +834,14 @@ class ArkLoopApi:
         self,
         name: str,
         autoenter: bool = False,
-        cycle_offset: int = 0,
-        breakpoints: Optional[List[Dict[str, int]]] = None,
+        frame_offset: int = 0,
+        breakpoints: Optional[List[int]] = None,
         calibration_path: Optional[str] = None,
     ) -> bool:
         """Start playing a timeline file in a background thread.
 
-        ``cycle_offset`` shifts where in the timeline playback starts (resume
-        from pause).  ``breakpoints`` is a list of {cycle, tick} dicts — the
-        runner pauses the game and stops when reaching one.
+        ``frame_offset`` shifts where in the timeline playback starts (resume
+        from pause).  ``breakpoints`` is a list of absolute frame numbers.
         """
         if self._playback_thread is not None and self._playback_thread.is_alive():
             return False
@@ -863,27 +859,25 @@ class ArkLoopApi:
         if calibration_path:
             _settings = {**_settings, "calibration_path": calibration_path}
 
-        bp_tuples: List[tuple] = []
+        bp_frames: List[int] = []
         for bp in breakpoints or []:
             try:
-                bp_tuples.append((int(bp.get("cycle", 0)), int(bp.get("tick", 0))))
+                bp_frames.append(int(bp))
             except (TypeError, ValueError):
                 continue
 
         from src.axis.axis_runner import AxisRunner
         self._playback_stop.clear()
-        # The runner's first perform_action will toggle pause itself; clear
-        # the flag so a subsequent start_recording doesn't double-toggle.
         self._game_paused_by_runner = False
-        cycle_offset_int = int(cycle_offset or 0)
+        frame_offset_int = int(frame_offset or 0)
 
         # A fresh playback (no resume offset) starts from a clean slate so a
         # stale deployed set from a previous timeline/run can't leak in. A
         # resume (offset > 0) carries the deployed set forward so operators
         # placed in earlier segments stay known.
-        if cycle_offset_int <= 0:
+        if frame_offset_int <= 0:
             self._last_playback_state = {}
-        seed_state = dict(self._last_playback_state) if cycle_offset_int > 0 else None
+        seed_state = dict(self._last_playback_state) if frame_offset_int > 0 else None
 
         # Game time is now pushed by the global _state_publisher (60 Hz from
         # the WS time source).  No per-playback publisher thread is needed —
@@ -918,8 +912,8 @@ class ArkLoopApi:
                     # tick_callback removed — game_time is pushed by the global
                     # _state_publisher from the WS time source at 60 Hz.
                     stop_event=self._playback_stop,
-                    cycle_offset=cycle_offset_int,
-                    breakpoints=bp_tuples,
+                    frame_offset=frame_offset_int,
+                    breakpoints=bp_frames,
                     on_pause=_on_runner_pause,
                     initial_state=seed_state,
                 )
@@ -932,18 +926,16 @@ class ArkLoopApi:
                 try:
                     ws = get_ws_time_source()
                     final_fc = int(ws.latest()[0])
-                    tick_max = GameTime.get_tick_max() or 30
-                    final_cycle = final_fc // tick_max
                 except Exception:
-                    final_fc, final_cycle = 0, 0
-                self._last_playback_cycle = final_cycle
+                    final_fc = 0
+                self._last_playback_frame = final_fc
                 logger.info(
-                    f"[playback] ended cycle={final_cycle} frame={final_fc} "
+                    f"[playback] ended frame={final_fc} "
                     f"state={self._last_playback_state}"
                 )
                 self._push_event(
                     "playback_done",
-                    {"cycle": final_cycle, "frame": final_fc, "state": self._last_playback_state},
+                    {"frame": final_fc, "state": self._last_playback_state},
                 )
 
         self._playback_thread = threading.Thread(target=_run, daemon=True)
@@ -959,7 +951,7 @@ class ArkLoopApi:
         with an empty deployed set.
         """
         self._last_playback_state = {}
-        self._last_playback_cycle = 0
+        self._last_playback_frame = 0
 
     def stop_playback(self, reset_state: bool = True) -> None:
         """Stop a running playback.
@@ -975,22 +967,19 @@ class ArkLoopApi:
         if reset_state:
             self.reset_playback_state()
 
-    def pause_playback(self) -> Dict[str, int]:
-        """Stop playback and return the last known cycle — frontend
-        uses it to set cycle_offset for resume. Emits 'paused' event too."""
-        # Reuse stop_playback but keep the carried-forward state: the latest
-        # game_time was already pushed during the runner's finally block and
-        # the cycle/state saved.
+    def pause_playback(self) -> Dict[str, Any]:
+        """Stop playback and return the last known frame — frontend
+        uses it to set frame_offset for resume. Emits 'paused' event too."""
         self.stop_playback(reset_state=False)
         logger.info(
-            f"[playback] paused cycle={self._last_playback_cycle} "
+            f"[playback] paused frame={self._last_playback_frame} "
             f"state={self._last_playback_state}"
         )
         self._push_event(
             "paused",
             {
                 "source": "playback",
-                "cycle": self._last_playback_cycle,
+                "frame": self._last_playback_frame,
                 "state": self._last_playback_state,
             },
         )
@@ -999,9 +988,9 @@ class ArkLoopApi:
     def append_to_timeline(self, name: str, new_actions: list) -> bool:
         """Append actions to an existing timeline file (used after resume-record).
 
-        Assumes ``new_actions`` already carry the correct (offset-biased) cycle
+        Assumes ``new_actions`` already carry the correct (offset-biased) frame
         values — the recorder backend handles that when started with
-        ``cycle_offset > 0``.
+        ``frame_offset > 0``.
         """
         try:
             path = (timelines_dir / name.strip()).resolve()
@@ -1117,8 +1106,7 @@ class ArkLoopApi:
             # Inject current game time if available
             game_time = self.backend.latest_game_time
             if game_time:
-                state["current_cycle"] = game_time["cycle"]
-                state["current_tick"] = game_time["tick"]
+                state["frame_count"] = game_time.get("frame", 0)
         self._push_event("state", state)
 
     def _push_event(self, event_type: str, data: Any) -> None:
@@ -1228,10 +1216,7 @@ def main() -> None:
                     connected = ws.is_fresh()
                     fc_int = int(fc)
                     if fc_int >= 0:
-                        tick_max = GameTime.get_tick_max() or 30
                         api._push_event("game_time", {
-                            "cycle": fc_int // tick_max,
-                            "tick":   fc_int %  tick_max,
                             "frame_count": fc_int,
                             "game_time": float(game_time),
                             "connected": connected,

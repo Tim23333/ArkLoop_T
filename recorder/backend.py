@@ -101,13 +101,13 @@ class AxisBuilder:
       from ``game_time.cycle``.
     """
 
-    def __init__(self, map_height: int, max_tick: int = 30, cycle_offset: int = 0) -> None:
+    def __init__(self, map_height: int, max_tick: int = 30, frame_offset: int = 0) -> None:
         self.map_height = map_height
         self.max_tick = max_tick
-        # Cycle offset applied to every emitted action — used when resuming a
-        # paused recording so new actions land at the correct absolute cycle
+        # Frame offset applied to every emitted action — used when resuming a
+        # paused recording so new actions land at the correct absolute frame
         # position in the (already-recorded) timeline.
-        self.cycle_offset = cycle_offset
+        self.frame_offset = frame_offset
         self.axis_actions: List[Dict[str, Any]] = []
         self.pending_deploys: Dict[Tuple[str, Optional[Tuple[int, int]]], SemanticAction] = {}
         self._lock = threading.Lock()
@@ -143,12 +143,8 @@ class AxisBuilder:
     def _to_axis_dict(self, sa: SemanticAction) -> Dict[str, Any]:
         out = sa.to_axis_dict(self.map_height)
         # Primary time field: absolute frame count with resume offset.
-        raw_frame = sa.game_time.get("total_elapsed_frames", 0) if sa.game_time else 0
-        frame_offset = self.cycle_offset * self.max_tick
-        out["frame"] = (raw_frame or 0) + frame_offset
-        # Legacy cycle with offset (kept for backward compat).
-        raw_cycle = sa.game_time.get("cycle", 0) if sa.game_time else 0
-        out["cycle"] = (raw_cycle or 0) + self.cycle_offset
+        raw_frame = sa.game_time.get("frame") or sa.game_time.get("total_elapsed_frames", 0) if sa.game_time else 0
+        out["frame"] = (raw_frame or 0) + self.frame_offset
         return out
 
     def get_axis(self) -> List[Dict[str, Any]]:
@@ -214,7 +210,7 @@ class ActionBackend:
         avatar_threshold: float = imgconfig.TEMPLATE_MATCH_THRESHOLD,
         cost_bar: bool = True,
         fake_avatar: bool = False,
-        cycle_offset: int = 0,
+        frame_offset: int = 0,
         recognizer_state: Optional[Dict[str, Any]] = None,
         devices: Optional[List[Dict[str, Any]]] = None,
         _matcher: Optional[Any] = None,
@@ -232,10 +228,8 @@ class ActionBackend:
         self.avatar_threshold = avatar_threshold
         self.cost_bar = cost_bar
         self.fake_avatar = fake_avatar
-        # Resume-recording bias: emitted actions get cycle += cycle_offset, and
-        # live game_time pushed to the UI is also biased so the playhead
-        # matches what will land in the file.
-        self.cycle_offset = cycle_offset
+        # Resume-recording bias: emitted actions get frame += frame_offset.
+        self.frame_offset = frame_offset
         self._recognizer_state = recognizer_state or {}
         self._devices = devices or []
         self._pre_matcher = _matcher
@@ -246,7 +240,7 @@ class ActionBackend:
         self.axis_builder = AxisBuilder(
             map_height=self.map_data.get("height", 0),
             max_tick=self.max_tick,
-            cycle_offset=cycle_offset,
+            frame_offset=frame_offset,
         )
 
         self.frame_source: Any = None
@@ -435,19 +429,16 @@ class ActionBackend:
         return self.axis_builder.get_axis()
 
     @property
-    def latest_game_time(self) -> Optional[Dict[str, int]]:
-        """Return best-effort current (cycle, tick) from the WS time feed.
+    def latest_game_time(self) -> Optional[Dict[str, Any]]:
+        """Return best-effort current frame from the WS time feed.
 
-        Biased by ``cycle_offset`` so a resumed recording's playhead matches
-        the absolute cycle that will land in the timeline file.
+        Biased by ``frame_offset`` so a resumed recording's playhead matches
+        the absolute frame that will land in the timeline file.
         """
         try:
             ws = get_ws_time_source()
-            gt = ws.get_game_time()
-            return {
-                "cycle": int(gt.cycle) + self.cycle_offset,
-                "tick": int(gt.tick),
-            }
+            frame = ws.get_game_time()
+            return {"frame": int(frame) + self.frame_offset}
         except Exception:
             return None
 
@@ -522,17 +513,14 @@ class ActionBackend:
                         except Exception:
                             frame, frame_ts = (None, 0.0)
 
-                    # Anchor this mouse action to the current game time read
-                    # from the WS feed (cycle/tick decomposition of frame_count).
+                    # Anchor this mouse action to the current frame from WS.
                     tick_state = None
                     try:
                         ws = get_ws_time_source()
-                        gt = ws.get_game_time()
+                        frame = ws.get_game_time()
                         fc, game_time, mem_ok = ws.latest()
                         tick_state = {
-                            "tick": int(gt.tick),
-                            "cycle": int(gt.cycle),
-                            "total_elapsed_frames": int(fc),
+                            "frame": int(frame),
                             "game_time": float(game_time),
                             "connected": bool(mem_ok),
                         }

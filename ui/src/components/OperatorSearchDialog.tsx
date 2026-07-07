@@ -4,8 +4,7 @@ import type { AxisAction, ActionRow, OperatorInfo } from '../types'
 interface OperatorSearchDialogProps {
   mode: 'add' | 'edit'
   row: ActionRow
-  targetCycle: number
-  targetTick: number
+  targetFrame: number
   existingAction?: AxisAction
   operators: OperatorInfo[]
   getAvatarUrl?: (oper: string) => Promise<string>
@@ -30,8 +29,7 @@ function OperatorAvatar({ id, getAvatarUrl }: { id: string; getAvatarUrl?: (id: 
 export function OperatorSearchDialog({
   mode,
   row,
-  targetCycle,
-  targetTick,
+  targetFrame,
   existingAction,
   operators,
   getAvatarUrl,
@@ -57,8 +55,7 @@ export function OperatorSearchDialog({
     const action: AxisAction = {
       action_type: row === 'deploy' ? '部署' : row === 'skill' ? '技能' : '撤退',
       oper: selectedOper,
-      tick: targetTick,
-      cycle: targetCycle,
+      frame: targetFrame,
     }
     if (row === 'deploy') {
       if (pos.trim()) action.pos = pos.trim()
@@ -81,7 +78,7 @@ export function OperatorSearchDialog({
           {mode === 'add' ? '添加操作' : '编辑操作'}
           <span className="ml-2 text-[10px] text-text-dim">
             {row === 'deploy' ? '部署' : row === 'skill' ? '技能' : '撤退'}
-            {' · '}周期 {targetCycle} · 帧 {targetTick}
+            {' · '}帧 {targetFrame}
           </span>
         </div>
 

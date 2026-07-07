@@ -1,11 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { AxisAction, BackendEvent, BackendState, RecognizerState } from '../types'
 
-export interface Breakpoint {
-  cycle: number
-  tick: number
-}
-
 export interface MapDevice {
   name: string
   pos: string
@@ -21,7 +16,7 @@ export interface TimelineSettings {
   bullet_threshold?: number
   frame_threshold?: number
   calibration_path?: string
-  breakpoints?: Breakpoint[]
+  breakpoints?: number[]
   devices?: MapDevice[]
 }
 
@@ -42,9 +37,9 @@ export interface TimelineData {
 
 export interface PyWebviewApi {
   init_app: () => Promise<{ ok: boolean; error?: string; avatars_loaded?: number }>
-  start_recording: (mapCode: string, maxTick?: number, calibrationPath?: string, fakeAvatar?: boolean, cycleOffset?: number, recognizerState?: RecognizerState, devices?: MapDevice[]) => Promise<void>
+  start_recording: (mapCode: string, maxTick?: number, calibrationPath?: string, fakeAvatar?: boolean, frameOffset?: number, recognizerState?: RecognizerState, devices?: MapDevice[]) => Promise<void>
   stop_recording: () => Promise<AxisAction[]>
-  pause_recording: () => Promise<{ cycle: number; tick: number; axis: AxisAction[] }>
+  pause_recording: () => Promise<{ frame: number; axis: AxisAction[] }>
   get_state: () => Promise<BackendState>
   get_axis: () => Promise<AxisAction[]>
   save_axis: (path: string) => Promise<boolean>
@@ -56,7 +51,7 @@ export interface PyWebviewApi {
   create_timeline: () => Promise<string>
   save_timeline: (name: string, actions: AxisAction[], settings: TimelineSettings) => Promise<boolean>
   append_to_timeline: (name: string, newActions: AxisAction[]) => Promise<boolean>
-  save_breakpoints: (name: string, breakpoints: Breakpoint[]) => Promise<boolean>
+  save_breakpoints: (name: string, breakpoints: number[]) => Promise<boolean>
   delete_timeline: (name: string) => Promise<boolean>
   duplicate_timeline: (name: string) => Promise<string>
   rename_timeline: (oldName: string, newName: string) => Promise<string>
@@ -66,7 +61,7 @@ export interface PyWebviewApi {
   set_pinned_timelines: (pinned: string[]) => Promise<boolean>
   get_window_bounds: () => Promise<{ x: number; y: number; width: number; height: number }>
   set_bounds: (x: number, y: number, width: number, height: number) => Promise<void>
-  start_playback: (name: string, autoenter?: boolean, cycleOffset?: number, breakpoints?: Breakpoint[], calibrationPath?: string) => Promise<boolean>
+  start_playback: (name: string, autoenter?: boolean, frameOffset?: number, breakpoints?: number[], calibrationPath?: string) => Promise<boolean>
   stop_playback: () => Promise<void>
   pause_playback: () => Promise<{ ok: boolean }>
   reset_playback_state: () => Promise<void>
@@ -132,28 +127,19 @@ export function useBackend() {
       const event = data as BackendEvent
       setEvents((prev) => [...prev, event])
       if (event.event_type === 'state') {
-        // Merge (not replace) so WS fields (ws_connected, frame_count,
-        // game_time_sec) set by game_time events are preserved.  A full
-        // replace would wipe them every ~50 ms during recording → flicker.
+        // Merge (not replace) so WS fields are preserved.
         setState((prev) => ({ ...(prev ?? {}), ...event.data }) as BackendState)
       } else if (event.event_type === 'game_time') {
-        // Lightweight high-rate cycle/tick + WS game_time/frame_count push —
-        // merge into state without discarding the heavier recognizer fields
-        // from the last full 'state'.
         const gt = event.data as {
-          cycle?: number
-          tick?: number
-          game_time?: number
           frame_count?: number
+          game_time?: number
           connected?: boolean
           mem_ok?: boolean
         }
         setState((prev) => ({
           ...(prev ?? {}),
-          current_cycle: gt.cycle ?? 0,
-          current_tick: gt.tick ?? 0,
-          game_time_sec: gt.game_time ?? 0,
           frame_count: gt.frame_count ?? 0,
+          game_time_sec: gt.game_time ?? 0,
           ws_connected: gt.connected ?? false,
           ws_mem_ok: gt.mem_ok ?? false,
         }) as BackendState)
@@ -177,12 +163,12 @@ export function useBackend() {
       mapCode: string,
       maxTick?: number,
       calibrationPath?: string,
-      cycleOffset?: number,
+      frameOffset?: number,
       recognizerState?: RecognizerState,
       devices?: MapDevice[],
     ) => {
       if (!api) throw new Error('pywebview.api not available')
-      return api.start_recording(mapCode, maxTick, calibrationPath, undefined, cycleOffset, recognizerState, devices)
+      return api.start_recording(mapCode, maxTick, calibrationPath, undefined, frameOffset, recognizerState, devices)
     },
     [api],
   )
@@ -193,32 +179,32 @@ export function useBackend() {
   }, [api])
 
   const pauseRecording = useCallback(async () => {
-    if (!api) throw new Error('pywebview.api not available')
+    if (!api) return { frame: 0, axis: [] }
     return api.pause_recording()
   }, [api])
 
   const getState = useCallback(async () => {
-    if (!api) throw new Error('pywebview.api not available')
+    if (!api) return {} as BackendState
     return api.get_state()
   }, [api])
 
   const getAxis = useCallback(async () => {
-    if (!api) throw new Error('pywebview.api not available')
+    if (!api) return [] as AxisAction[]
     return api.get_axis()
   }, [api])
 
   const saveAxis = useCallback(async (path: string) => {
-    if (!api) throw new Error('pywebview.api not available')
+    if (!api) return false
     return api.save_axis(path)
   }, [api])
 
   const listCalibrations = useCallback(async () => {
-    if (!api) throw new Error('pywebview.api not available')
+    if (!api) return [] as string[]
     return api.list_calibrations()
   }, [api])
 
   const getCalibrationInfo = useCallback(async (path: string) => {
-    if (!api) throw new Error('pywebview.api not available')
+    if (!api) return { total_frames: 0, screen_width: 0, screen_height: 0 }
     return api.get_calibration_info(path)
   }, [api])
 
@@ -228,35 +214,48 @@ export function useBackend() {
   }, [api])
 
   const listTimelines = useCallback(async () => {
-    if (!api) return []
+    if (!api) return [] as string[]
     return api.list_timelines()
   }, [api])
 
   const loadTimeline = useCallback(async (name: string) => {
-    if (!api) throw new Error('pywebview.api not available')
+    if (!api) return { settings: {}, actions: [] } as TimelineData
     return api.load_timeline(name)
   }, [api])
 
   const createTimeline = useCallback(async () => {
-    if (!api) throw new Error('pywebview.api not available')
+    if (!api) return ''
     return api.create_timeline()
   }, [api])
 
-  const saveTimeline = useCallback(
-    async (name: string, actions: AxisAction[], settings: TimelineSettings) => {
-      if (!api) throw new Error('pywebview.api not available')
-      return api.save_timeline(name, actions, settings)
+  const saveTimeline = useCallback(async (name: string, actions: AxisAction[], settings: TimelineSettings) => {
+    if (!api) return false
+    return api.save_timeline(name, actions, settings)
+  }, [api])
+
+  const appendToTimeline = useCallback(
+    async (name: string, newActions: AxisAction[]) => {
+      if (!api) return false
+      return api.append_to_timeline(name, newActions)
+    },
+    [api],
+  )
+
+  const saveBreakpoints = useCallback(
+    async (name: string, breakpoints: number[]) => {
+      if (!api) return false
+      return api.save_breakpoints(name, breakpoints)
     },
     [api],
   )
 
   const deleteTimeline = useCallback(async (name: string) => {
-    if (!api) throw new Error('pywebview.api not available')
+    if (!api) return false
     return api.delete_timeline(name)
   }, [api])
 
   const renameTimeline = useCallback(async (oldName: string, newName: string) => {
-    if (!api) throw new Error('pywebview.api not available')
+    if (!api) return ''
     return api.rename_timeline(oldName, newName)
   }, [api])
 
@@ -290,18 +289,15 @@ export function useBackend() {
     return api.get_window_bounds()
   }, [api])
 
-  const setBounds = useCallback(
-    async (x: number, y: number, width: number, height: number) => {
-      if (!api) return
-      return api.set_bounds(x, y, width, height)
-    },
-    [api],
-  )
+  const setBounds = useCallback(async (x: number, y: number, width: number, height: number) => {
+    if (!api) return
+    return api.set_bounds(x, y, width, height)
+  }, [api])
 
   const startPlayback = useCallback(
-    async (name: string, autoenter?: boolean, cycleOffset?: number, breakpoints?: Breakpoint[], calibrationPath?: string) => {
+    async (name: string, autoenter?: boolean, frameOffset?: number, breakpoints?: number[], calibrationPath?: string) => {
       if (!api) return false
-      return api.start_playback(name, autoenter, cycleOffset, breakpoints, calibrationPath)
+      return api.start_playback(name, autoenter, frameOffset, breakpoints, calibrationPath)
     },
     [api],
   )
@@ -321,22 +317,6 @@ export function useBackend() {
     return api.reset_playback_state()
   }, [api])
 
-  const appendToTimeline = useCallback(
-    async (name: string, newActions: AxisAction[]) => {
-      if (!api) return false
-      return api.append_to_timeline(name, newActions)
-    },
-    [api],
-  )
-
-  const saveBreakpoints = useCallback(
-    async (name: string, breakpoints: Breakpoint[]) => {
-      if (!api) return false
-      return api.save_breakpoints(name, breakpoints)
-    },
-    [api],
-  )
-
   const listOperators = useCallback(async () => {
     if (!api) return [] as Array<{ id: string; name: string }>
     return api.list_operators()
@@ -352,13 +332,10 @@ export function useBackend() {
     return api.list_timeline_presets()
   }, [api])
 
-  const saveTimelinePreset = useCallback(
-    async (name: string, settings: TimelineSettings) => {
-      if (!api) return false
-      return api.save_timeline_preset(name, settings)
-    },
-    [api],
-  )
+  const saveTimelinePreset = useCallback(async (name: string, settings: TimelineSettings) => {
+    if (!api) return false
+    return api.save_timeline_preset(name, settings)
+  }, [api])
 
   const deleteTimelinePreset = useCallback(async (name: string) => {
     if (!api) return false

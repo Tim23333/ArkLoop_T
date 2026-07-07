@@ -34,8 +34,6 @@ _SETTING_KEYS = {
     "bullet_threshold",
     "frame_threshold",
     "calibration_path",
-    # Per-timeline breakpoints: list of {"cycle": int, "tick": int}.
-    # Runner pauses on reaching each. Ignored by the recorder.
     "breakpoints",
 }
 
@@ -45,10 +43,8 @@ def _parse_action(raw: Dict[str, Any], row: int, max_tick: int = 30) -> Action:
 
     Supports two time formats:
     - New: ``{"frame": 1190, ...}`` — absolute frame count.
-    - Legacy: ``{"cycle": 10, "tick": 0, ...}`` — cost-bar decomposition.
-
-    When ``frame`` is present, ``cycle`` and ``tick`` are derived from it
-    (using ``max_tick``) so that all downstream code can rely on either field.
+    - Legacy: ``{"cycle": 10, "tick": 0, ...}`` — cost-bar decomposition
+      (converted to frame = cycle * max_tick + tick).
     """
     try:
         action_type_str = raw.get("action_type")
@@ -64,23 +60,18 @@ def _parse_action(raw: Dict[str, Any], row: int, max_tick: int = 30) -> Action:
             raise ValueError(f"Unknown direction: {direction_str}")
 
         frame: Optional[int] = raw.get("frame")
-        cycle: Optional[int] = raw.get("cycle")
-        tick: Optional[int] = raw.get("tick")
 
-        # Derive cycle/tick from frame when the legacy fields are absent.
-        if frame is not None:
-            if cycle is None:
-                cycle = frame // max_tick
-            if tick is None:
-                tick = frame % max_tick
-        # Derive frame from cycle/tick when only legacy fields are present.
-        elif cycle is not None and tick is not None:
-            frame = cycle * max_tick + tick
+        # Legacy compat: compute frame from cycle/tick if frame is absent.
+        if frame is None:
+            cycle = raw.get("cycle")
+            tick = raw.get("tick")
+            if cycle is not None and tick is not None:
+                frame = int(cycle) * max_tick + int(tick)
+            else:
+                frame = None
 
         return Action(
-            frame=frame,
-            cycle=cycle,
-            tick=tick,
+            frame=int(frame) if frame is not None else None,
             action_type=action_type,
             oper=raw.get("oper"),
             pos=raw.get("pos"),
@@ -96,23 +87,13 @@ def load_axis_from_json(file_path: str) -> Tuple[List[Action], Dict[str, Any]]:
     """
     Load an axis from a JSON file.
 
-    Supported JSON structures::
+    Supports two formats::
 
-        // New format (frame-based)
-        {
-            "settings": { "map_code": "1-7", "max_tick": 30, ... },
-            "actions": [
-                { "frame": 1190, "action_type": "部署", "oper": "...", ... }
-            ]
-        }
+        // New (frame-based)
+        {"settings": {...}, "actions": [{"frame": 1190, "action_type": "部署", ...}]}
 
-        // Legacy format (cycle/tick-based)
-        {
-            "settings": { "map_code": "1-7", "max_tick": 119, ... },
-            "actions": [
-                { "cycle": 10, "tick": 0, "action_type": "部署", "oper": "...", ... }
-            ]
-        }
+        // Legacy (cycle/tick — converted to frame = cycle * max_tick + tick)
+        {"settings": {"max_tick": 119, ...}, "actions": [{"cycle": 10, "tick": 0, ...}]}
 
     Returns:
         Tuple of (list of Action instances, settings dict).
@@ -147,13 +128,3 @@ def load_axis_from_json(file_path: str) -> Tuple[List[Action], Dict[str, Any]]:
 
     logger.info(f"Loaded {len(actions)} actions from {file_path}")
     return actions, settings
-
-
-if __name__ == "__main__":
-    # Simple sanity test
-    actions, settings = load_axis_from_json(
-        os.path.join(os.path.dirname(__file__), "..", "..", "sample-1-7.json")
-    )
-    print(settings)
-    for a in actions[:3]:
-        print(a)

@@ -4,10 +4,7 @@ export interface AxisAction {
   pos?: string
   direction?: string
   cost?: number
-  /** Absolute frame count (new format). */
-  frame?: number
-  tick: number
-  cycle: number
+  frame: number
 }
 
 export interface RecognizerState {
@@ -25,11 +22,9 @@ export interface BackendState {
   deployed?: Record<string, string>
   pending_oper?: string | null
   queue_size?: number
-  current_cycle?: number
-  current_tick?: number
+  frame_count?: number
   // Live game-time feed from the WebSocket time source.
   game_time_sec?: number
-  frame_count?: number
   ws_connected?: boolean
   ws_mem_ok?: boolean
 }
@@ -44,20 +39,18 @@ export interface BackendEvent {
   data: Record<string, unknown>
 }
 
-export interface TimelineItem {
-  id: string
-  name: string
-  selected?: boolean
+export interface AxisBlock {
+  row: ActionRow
+  frame: number
+  actions: AxisAction[]
+  x?: number
+  width?: number
+  endX?: number
 }
 
 export type ActionRow = 'deploy' | 'skill' | 'retreat'
 
-export interface AxisBlock {
-  row: ActionRow
-  cycle: number
-  tick: number
-  actions: AxisAction[]
-  width?: number
-  x?: number
-  endX?: number
+export interface TimelineItem {
+  id: string
+  name: string
 }

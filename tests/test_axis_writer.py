@@ -73,7 +73,7 @@ class AxisWriterTests(unittest.TestCase):
             tile_pos=(3, 1),
             side=False,
             direction=DirectionType.RIGHT,
-            game_time={"tick": 0, "cycle": 2},
+            game_time={"frame": 60},
             raw={"start_ts": 1.0},
         )
         recognizer_instance = mock_avatar_matcher.return_value
@@ -96,8 +96,7 @@ class AxisWriterTests(unittest.TestCase):
         self.assertEqual(actions[0].oper, "斑点")
         self.assertEqual(actions[0].pos, "D2")
         self.assertEqual(actions[0].direction.name, "RIGHT")
-        self.assertEqual(actions[0].cycle, 2)
-        self.assertEqual(actions[0].tick, 0)
+        self.assertEqual(actions[0].frame, 60)
 
 
 if __name__ == "__main__":

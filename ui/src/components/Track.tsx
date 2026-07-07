@@ -17,10 +17,10 @@ interface TrackProps {
   onBlockClick?: (block: AxisBlock, e: React.MouseEvent) => void
   onBlockContextMenu?: (block: AxisBlock, e: React.MouseEvent) => void
   onBlockDragStart?: (block: AxisBlock, e: React.MouseEvent) => void
-  onTrackDoubleClick?: (row: ActionRow, cycle: number, tick: number) => void
+  onTrackDoubleClick?: (row: ActionRow, frame: number) => void
 }
 
-/** Find the tick (cycle, tick) nearest to x in scroll-container space. */
+/** Find the tick nearest to x in scroll-container space. */
 function nearestTick(ticks: TickPosition[], x: number): TickPosition | null {
   if (!ticks.length) return null
   return ticks.reduce((best, t) =>
@@ -43,10 +43,9 @@ export function Track({
   const handleBackgroundDblClick = (e: React.MouseEvent<SVGRectElement>) => {
     if (!onTrackDoubleClick) return
     const rect = (e.currentTarget as SVGRectElement).ownerSVGElement!.getBoundingClientRect()
-    // x in scroll-container space (SVG starts at x=0 in scroll container)
     const x = e.clientX - rect.left
     const t = nearestTick(ticks, x)
-    if (t) onTrackDoubleClick(row, t.cycle, t.tick)
+    if (t) onTrackDoubleClick(row, t.frame)
   }
 
   return (
