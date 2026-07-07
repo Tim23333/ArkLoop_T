@@ -4,7 +4,7 @@ Loads the React frontend from ``ui/dist/index.html`` and exposes the action
 recognition backend via ``pywebview.api``.
 
 Usage:
-    .venv\Scripts\python scripts/arkloop_webview.py
+    .venv\\Scripts\\python scripts/arkloop_webview.py
 """
 
 from __future__ import annotations
