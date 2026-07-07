@@ -24,7 +24,7 @@ const config: Config = {
         'grid-light': '#252B32',
         tick: '#59616A',
         divider: '#1D232A',
-        workspace: '#FAFAFA',
+        workspace: '#14181C',
         'accent-blue': '#49B8FF',
         'accent-red': '#FF3B36',
         'accent-green': '#35C64A',

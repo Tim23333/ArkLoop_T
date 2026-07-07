@@ -74,7 +74,7 @@ export function Workspace({ mapCode, onCapture }: WorkspaceProps) {
       <div
         onClick={() => { if (!loading) void doCapture() }}
         className={[
-          'flex-1 h-full bg-workspace border-b border-[#D2D2D2] flex flex-col items-center justify-center gap-2',
+          'flex-1 h-full bg-workspace border-b border-border-panel flex flex-col items-center justify-center gap-2',
           loading ? 'cursor-wait' : 'cursor-pointer',
           'hover:bg-[#0d1217] transition-colors',
         ].join(' ')}
@@ -106,7 +106,7 @@ export function Workspace({ mapCode, onCapture }: WorkspaceProps) {
 
   return (
     <div
-      className="flex-1 h-full bg-workspace border-b border-[#D2D2D2] relative"
+      className="flex-1 h-full bg-workspace border-b border-border-panel relative"
     >
       <img
         src={imgUrl}
