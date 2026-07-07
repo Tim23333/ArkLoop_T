@@ -167,14 +167,9 @@ class WSTimeSource:
             self._game_time = game_time
             self._mem_ok = mem_ok
             self._ever_received = True
-            cb = self._callback
-        # Fire callback outside the lock so a slow handler doesn't block
-        # the WS receiver thread from processing the next message.
-        if cb is not None:
-            try:
-                cb(frame_count, game_time, mem_ok)
-            except Exception:
-                logger.debug("WSTimeSource callback error", exc_info=True)
+        # NO callback / evaluate_js here — that would block the recv loop and
+        # cause buffer accumulation at 125 Hz.  The display thread polls the
+        # cache at a fixed rate instead.
 
     # ------------------------------------------------------------------
     # Reads (thread-safe, non-blocking)

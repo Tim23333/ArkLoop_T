@@ -405,25 +405,6 @@ class ArkLoopApi:
                 ws = get_ws_time_source()
                 ws.start(url=ws_url)
                 logger.info(f"WS time source started (url={ws_url})")
-
-                # Event-driven: push game_time to the frontend immediately
-                # when the WS server sends new data, instead of polling at a
-                # fixed rate.  Only pushes when frame_count actually changes.
-                def _on_ws_frame(fc: int, game_time: float, mem_ok: bool) -> None:
-                    if fc == _on_ws_frame.last_fc:
-                        return
-                    _on_ws_frame.last_fc = fc
-                    tick_max = GameTime.get_tick_max() or 30
-                    self._push_event("game_time", {
-                        "cycle": fc // tick_max,
-                        "tick":   fc %  tick_max,
-                        "frame_count": fc,
-                        "game_time": game_time,
-                        "connected": ws.is_connected(),
-                        "mem_ok": mem_ok,
-                    })
-                _on_ws_frame.last_fc = -1  # type: ignore[attr-defined]
-                ws.set_callback(_on_ws_frame)
             except Exception as exc:
                 logger.warning(f"Failed to start WS time source: {exc}")
 
@@ -1253,19 +1234,48 @@ def main() -> None:
     # Allow Ctrl+C to exit cleanly
     signal.signal(signal.SIGINT, lambda _s, _f: api.close_window())
 
-    # Periodically push state while recording.
-    # Periodically push state while recording.
-    # game_time is now pushed by the WS callback (event-driven, no polling).
-    # This publisher only handles:
-    #   - ws_status changes (for the settings UI)
-    #   - full state + axis while recording (~10 Hz)
+    # Periodically push game_time + state to the frontend.
+    #
+    # Architecture: the WS recv thread (on_message) ONLY updates a shared
+    # cache — it never calls evaluate_js.  This thread polls the cache at
+    # 60 Hz and pushes to the frontend.  recv and display are fully decoupled
+    # so the 125 Hz WS feed never backs up.
     def _state_publisher() -> None:
         last_axis_len: int = 0
         last_ws_status: Optional[Dict[str, Any]] = None
+        # Held-last-good: when the server's mem_ok is briefly false, hold the
+        # last good frame_count/game_time so the display doesn't flash to 0.
+        good_fc: int = -1
+        good_game_time: float = 0.0
+        good_cycle: int = 0
+        good_tick: int = 0
         slow_counter = 0
         while True:
             time.sleep(0.016)  # 16 ms, ~60 Hz
             try:
+                # Fast lane: game_time from WS cache (reads ints under lock, <0.1ms).
+                try:
+                    ws = get_ws_time_source()
+                    fc, game_time, mem_ok = ws.latest()
+                    connected = ws.is_connected()
+                    if mem_ok:
+                        good_fc = int(fc)
+                        good_game_time = float(game_time)
+                        tick_max = GameTime.get_tick_max() or 30
+                        good_cycle = good_fc // tick_max
+                        good_tick = good_fc % tick_max
+                    if good_fc >= 0:
+                        api._push_event("game_time", {
+                            "cycle": good_cycle,
+                            "tick": good_tick,
+                            "frame_count": good_fc,
+                            "game_time": good_game_time,
+                            "connected": connected,
+                            "mem_ok": bool(mem_ok),
+                        })
+                except Exception:
+                    pass
+
                 # Surface WS connection status changes (for the settings UI).
                 try:
                     status = get_ws_time_source().status()
