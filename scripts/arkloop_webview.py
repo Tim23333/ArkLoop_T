@@ -1140,13 +1140,12 @@ def main() -> None:
     # time service is connected.
     def _state_publisher() -> None:
         last_axis_len: int = 0
-        last_fc: int = -1
-        last_connected: Optional[bool] = None
         last_ws_status: Optional[Dict[str, Any]] = None
-        # Held-last-good values: when the server's memory read briefly reports
-        # not-OK (mem_ok=false), hold the last good frame_count/game_time so the
-        # readout doesn't flash to 0 or "未连接" on a transient blip. The WS
-        # server pushes ~every 10ms; a single mem_ok=false must not flip the UI.
+        # Held-last-good: when the server's memory read briefly reports not-OK
+        # (mem_ok=false), hold the last good frame_count/game_time so the
+        # readout doesn't flash to 0.  Push unconditionally at 30 Hz so the
+        # frontend always gets a fresh update — no "push only on change" gating
+        # that would freeze the display when mem_ok toggles.
         good_fc: int = -1
         good_game_time: float = 0.0
         good_cycle: int = 0
@@ -1156,33 +1155,27 @@ def main() -> None:
             time.sleep(1.0 / 30.0)  # ~33 ms, 30 Hz
             try:
                 # Fast lane: lightweight cycle/tick + WS game_time/frame_count,
-                # pushed only on change.  Available with or without an active
-                # backend — the playhead + time readout show whenever the game
-                # time service is connected.
+                # pushed at 30 Hz regardless of whether the value changed.
+                # Available with or without an active backend — the playhead +
+                # time readout show whenever the game time service is connected.
                 try:
                     ws = get_ws_time_source()
                     gt = ws.get_game_time()
                     fc, game_time, mem_ok = ws.latest()
-                    # Transport-level connection (stable) — NOT the per-message
-                    # mem_ok flag, which toggles on transient memory-read blips.
                     connected = ws.is_connected()
                     if mem_ok:
                         good_fc = int(fc)
                         good_game_time = float(game_time)
                         good_cycle = int(gt.cycle)
                         good_tick = int(gt.tick)
-                    disp_fc = good_fc if good_fc >= 0 else int(fc)
-                    if disp_fc != last_fc or connected != last_connected:
-                        api._push_event("game_time", {
-                            "cycle": good_cycle if good_fc >= 0 else int(gt.cycle),
-                            "tick": good_tick if good_fc >= 0 else int(gt.tick),
-                            "frame_count": disp_fc,
-                            "game_time": good_game_time if good_fc >= 0 else float(game_time),
-                            "connected": connected,
-                            "mem_ok": bool(mem_ok),
-                        })
-                        last_fc = disp_fc
-                        last_connected = connected
+                    api._push_event("game_time", {
+                        "cycle": good_cycle,
+                        "tick": good_tick,
+                        "frame_count": good_fc,
+                        "game_time": good_game_time,
+                        "connected": connected,
+                        "mem_ok": bool(mem_ok),
+                    })
                 except Exception:
                     pass
 
