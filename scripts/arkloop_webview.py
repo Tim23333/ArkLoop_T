@@ -1213,35 +1213,27 @@ def main() -> None:
     def _state_publisher() -> None:
         last_axis_len: int = 0
         last_ws_status: Optional[Dict[str, Any]] = None
-        # Held-last-good: when the server's mem_ok is briefly false, hold the
-        # last good frame_count/game_time so the display doesn't flash to 0.
-        good_fc: int = -1
-        good_game_time: float = 0.0
-        good_cycle: int = 0
-        good_tick: int = 0
         slow_counter = 0
         while True:
             time.sleep(0.016)  # 16 ms, ~60 Hz
             try:
                 # Fast lane: game_time from WS cache (reads ints under lock, <0.1ms).
+                # Always use the latest frame_count — do NOT gate on mem_ok.
+                # mem_ok only affects the "connected" display flag; the playhead
+                # must track frame_count regardless, otherwise the timeline
+                # freezes whenever the server reports connected=false.
                 try:
                     ws = get_ws_time_source()
                     fc, game_time, mem_ok = ws.latest()
-                    # Use is_fresh() (data < 2s old) instead of is_connected()
-                    # so brief reconnects don't flip the display to "未连接".
                     connected = ws.is_fresh()
-                    if mem_ok:
-                        good_fc = int(fc)
-                        good_game_time = float(game_time)
+                    fc_int = int(fc)
+                    if fc_int >= 0:
                         tick_max = GameTime.get_tick_max() or 30
-                        good_cycle = good_fc // tick_max
-                        good_tick = good_fc % tick_max
-                    if good_fc >= 0:
                         api._push_event("game_time", {
-                            "cycle": good_cycle,
-                            "tick": good_tick,
-                            "frame_count": good_fc,
-                            "game_time": good_game_time,
+                            "cycle": fc_int // tick_max,
+                            "tick":   fc_int %  tick_max,
+                            "frame_count": fc_int,
+                            "game_time": float(game_time),
                             "connected": connected,
                             "mem_ok": bool(mem_ok),
                         })
