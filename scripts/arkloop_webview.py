@@ -1152,7 +1152,7 @@ def main() -> None:
         good_tick: int = 0
         slow_counter = 0
         while True:
-            time.sleep(1.0 / 30.0)  # ~33 ms, 30 Hz
+            time.sleep(0.016)  # 16 ms, ~60 Hz
             try:
                 # Fast lane: lightweight cycle/tick + WS game_time/frame_count,
                 # pushed at 30 Hz regardless of whether the value changed.
