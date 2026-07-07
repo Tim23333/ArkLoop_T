@@ -834,6 +834,7 @@ export default function App() {
           actions={displayedAxis}
           recording={isRecording}
           playing={isPlaying}
+          currentFrame={frameCount}
           currentCycle={currentCycle}
           currentTick={currentTick}
           maxTick={maxTick}

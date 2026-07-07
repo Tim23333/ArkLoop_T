@@ -38,6 +38,8 @@ const OTHER_SLOT_W  = 30   // ≈ avatarH(22) + padding(8)
 export interface TickPosition {
   cycle: number
   tick: number
+  /** Absolute frame count within the timeline (= cycle * maxTick + tick). */
+  frame: number
   x: number
   isCycleStart: boolean
   displayTick: number
@@ -100,7 +102,7 @@ export function useTimelineLayout(
 
     for (let cycle = startCycle; cycle < endCycle; cycle++) {
       for (let tick = 0; tick < maxTick; tick++) {
-        ticks.push({ cycle, tick, x, isCycleStart: tick === 0, displayTick: tick })
+        ticks.push({ cycle, tick, frame: cycle * maxTick + tick, x, isCycleStart: tick === 0, displayTick: tick })
 
         const tickBlocks = blocks.filter((b) => b.cycle === cycle && b.tick === tick)
         let blockEnd = x

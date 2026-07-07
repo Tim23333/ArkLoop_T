@@ -12,6 +12,8 @@ interface TimelineProps {
   actions?: AxisAction[]
   recording?: boolean
   playing?: boolean
+  /** Current absolute frame count from the WS time source. */
+  currentFrame?: number
   currentCycle?: number
   currentTick?: number
   maxTick?: number
@@ -50,8 +52,9 @@ export function Timeline({
   actions = [],
   recording = false,
   playing = false,
-  currentCycle = 0,
-  currentTick = 0,
+  currentFrame = 0,
+  currentCycle: _currentCycle = 0,
+  currentTick: _currentTick = 0,
   maxTick = DEFAULT_LAYOUT.maxTick,
   breakpoints = [],
   getAvatarUrl,
@@ -87,10 +90,12 @@ export function Timeline({
   // the user scrolls near the right edge → effectively infinite for editing.
   const [scrollChunks, setScrollChunks] = useState(1)
 
+  // Derive cycle from frame_count for chunk-based pre-rendering.
+  const derivedCycle = Math.floor(currentFrame / (maxTick || 1))
   // Render up to this cycle. Quantized to CHUNK_CYCLES so the layout memo only
   // recomputes once per chunk (pre-render), not on every tick of the playhead.
   const liveChunkCycle = liveMode
-    ? (Math.floor(currentCycle / CHUNK_CYCLES) + 2) * CHUNK_CYCLES
+    ? (Math.floor(derivedCycle / CHUNK_CYCLES) + 2) * CHUNK_CYCLES
     : 0
   const extendToCycle = Math.max(scrollChunks * CHUNK_CYCLES, liveChunkCycle)
 
@@ -101,20 +106,16 @@ export function Timeline({
     extendToCycle,
   )
 
-  // Current tick position in content space. During recording AND playback the
-  // backend pushes (cycle, tick) at a high rate read straight from the game
-  // screen (cost-bar detection), so simply following the discrete position is
-  // both accurate and smooth — including when playback pauses / frame-steps.
-  const playheadTick = ticks.find(
-    (t) => t.cycle === currentCycle && t.tick === currentTick,
-  )
+  // Current tick position in content space. The WS time source pushes
+  // frame_count at ~125 Hz; the playhead tracks the absolute frame.
+  const playheadTick = ticks.find((t) => t.frame === currentFrame)
   const playheadContentX = playheadTick?.x ?? 0
 
   // ── Keep the playhead at PLAYHEAD_VIEWPORT_X: scroll the content under it ──
   useEffect(() => {
     if (!liveMode || !scrollRef.current) return
     scrollRef.current.scrollLeft = Math.max(0, playheadContentX - PLAYHEAD_VIEWPORT_X)
-  }, [currentCycle, currentTick, liveMode, playheadContentX])
+  }, [currentFrame, liveMode, playheadContentX])
 
   // ── Grow the timeline when the user scrolls near the right edge ─────
   const handleScroll = useCallback(() => {
