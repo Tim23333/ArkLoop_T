@@ -885,42 +885,12 @@ class ArkLoopApi:
             self._last_playback_state = {}
         seed_state = dict(self._last_playback_state) if cycle_offset_int > 0 else None
 
-        # The runner reads (cycle, tick) from the screen at high frequency inside
-        # its timing-critical loop.  The callback it invokes must be cheap, so it
-        # only stores the latest value; a separate low-rate publisher thread ships
-        # it to the UI.  This keeps webview I/O out of the frame-stepping hot loop.
-        #
-        # The runner emits cycle directly from PlaybackTimeSource (cost-bar wrap
-        # counter) — no wrap counting needed here.
-        gt_holder = {"cycle": 0, "tick": 0}
-        gt_lock = threading.Lock()
-        gt_changed = threading.Event()
-
-        def _on_game_time(cycle: int, tick: int) -> None:
-            # cycle from runner is the in-game wrap counter (offset-subtracted
-            # from the perspective of perform_action); bias it back to the
-            # timeline cycle the UI shows.
-            with gt_lock:
-                gt_holder["cycle"] = cycle + cycle_offset_int
-                gt_holder["tick"] = tick
-            gt_changed.set()
-
-        def _publisher(stop: threading.Event) -> None:
-            last: Optional[tuple] = None
-            while not stop.is_set():
-                if not gt_changed.wait(0.1):
-                    continue
-                gt_changed.clear()
-                with gt_lock:
-                    cur = (gt_holder["cycle"], gt_holder["tick"])
-                if cur != last:
-                    self._push_event("game_time", {"cycle": cur[0], "tick": cur[1]})
-                    last = cur
+        # Game time is now pushed by the global _state_publisher (60 Hz from
+        # the WS time source).  No per-playback publisher thread is needed —
+        # the runner only needs the observer for breakpoint checking.
 
         def _run() -> None:
-            pub_stop = threading.Event()
-            pub_thread = threading.Thread(target=_publisher, args=(pub_stop,), daemon=True)
-            pub_thread.start()
+            runner = None
             try:
                 def _on_runner_pause(cycle: int, tick: int) -> None:
                     # Breakpoint fired — runner already paused the game.
@@ -945,7 +915,8 @@ class ArkLoopApi:
                     is_paused=self._playback_stop.is_set,
                     autoenter=autoenter,
                     show_error=lambda msg: logger.error(f"Playback error: {msg}"),
-                    tick_callback=_on_game_time,
+                    # tick_callback removed — game_time is pushed by the global
+                    # _state_publisher from the WS time source at 60 Hz.
                     stop_event=self._playback_stop,
                     cycle_offset=cycle_offset_int,
                     breakpoints=bp_tuples,
@@ -956,24 +927,23 @@ class ArkLoopApi:
             except Exception as exc:
                 logger.exception(f"Playback error: {exc}")
             finally:
-                pub_stop.set()
-                with gt_lock:
-                    cur = (gt_holder["cycle"], gt_holder["tick"])
-                self._last_playback_cycle = int(cur[0])
-                if runner is not None:
-                    self._last_playback_state = runner.get_state()
-                # Reaching the end of the timeline is treated like a pause: the
-                # carried-forward state and cycle are KEPT so the user can keep
-                # recording / playing onward from where the run finished. State
-                # is only cleared by an explicit reset (timeline switch / red ■).
+                self._last_playback_state = runner.get_state() if runner is not None else {}
+                # Read final frame from WS for the playback_done event.
+                try:
+                    ws = get_ws_time_source()
+                    final_fc = int(ws.latest()[0])
+                    tick_max = GameTime.get_tick_max() or 30
+                    final_cycle = final_fc // tick_max
+                except Exception:
+                    final_fc, final_cycle = 0, 0
+                self._last_playback_cycle = final_cycle
                 logger.info(
-                    f"[playback] ended cycle={self._last_playback_cycle} "
+                    f"[playback] ended cycle={final_cycle} frame={final_fc} "
                     f"state={self._last_playback_state}"
                 )
-                self._push_event("game_time", {"cycle": cur[0], "tick": cur[1]})
                 self._push_event(
                     "playback_done",
-                    {"cycle": cur[0], "state": self._last_playback_state},
+                    {"cycle": final_cycle, "frame": final_fc, "state": self._last_playback_state},
                 )
 
         self._playback_thread = threading.Thread(target=_run, daemon=True)

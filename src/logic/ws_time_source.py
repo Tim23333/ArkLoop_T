@@ -115,11 +115,13 @@ class WSTimeSource:
 
     def _run(self) -> None:
         # run_forever handles reconnect internally; the stop_event is checked
-        # via the close() call from stop().  A short ping interval keeps the
-        # connection alive and surfaces dead sockets quickly.
+        # via the close() call from stop().  Pings are disabled because the
+        # server pushes data every ~8 ms — if the server dies, recv() will
+        # fail naturally.  Aggressive ping/pong was causing spurious
+        # disconnects when the server didn't respond to pings in time.
         while not self._stop.is_set():
             try:
-                self._ws.run_forever(ping_interval=5, ping_timeout=4)
+                self._ws.run_forever(ping_interval=0)
             except Exception as exc:
                 logger.warning(f"WSTimeSource run_forever exited: {exc}")
             if self._stop.is_set():
