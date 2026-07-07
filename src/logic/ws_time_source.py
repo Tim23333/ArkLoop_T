@@ -57,6 +57,10 @@ class WSTimeSource:
         self._ws: Optional[Any] = None
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        # Timestamp of the last received message (time.monotonic).  Used to
+        # implement a grace period: briefly disconnected → keep pushing last
+        # known data instead of immediately flipping to "未连接".
+        self._last_msg_time: float = 0.0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -126,8 +130,10 @@ class WSTimeSource:
                 logger.warning(f"WSTimeSource run_forever exited: {exc}")
             if self._stop.is_set():
                 break
-            # Backoff before run_forever reconnects on the next iteration.
-            self._stop.wait(1.0)
+            # Brief backoff before reconnect.  Keep it short so the display
+            # recovers quickly when the game pauses/resumes (the server may
+            # drop the connection during pause).
+            self._stop.wait(0.1)
 
     # ------------------------------------------------------------------
     # WebSocketApp callbacks (run in the background thread)
@@ -169,6 +175,7 @@ class WSTimeSource:
             self._game_time = game_time
             self._mem_ok = mem_ok
             self._ever_received = True
+            self._last_msg_time = time.monotonic()
         # NO callback / evaluate_js here — that would block the recv loop and
         # cause buffer accumulation at 125 Hz.  The display thread polls the
         # cache at a fixed rate instead.
@@ -190,6 +197,16 @@ class WSTimeSource:
     def ever_received(self) -> bool:
         with self._data_lock:
             return self._ever_received
+
+    def is_fresh(self, max_age: float = 2.0) -> bool:
+        """True if a message was received within the last ``max_age`` seconds.
+
+        Used by the display publisher to avoid flipping to "未连接" during
+        brief disconnects / reconnects — if data is less than 2 s old it's
+        still "live" even if the transport is momentarily down.
+        """
+        with self._data_lock:
+            return self._ever_received and (time.monotonic() - self._last_msg_time) < max_age
 
     def wait_connected(self, timeout: float = 5.0) -> bool:
         """Block briefly until the first message arrives. Returns True on success."""

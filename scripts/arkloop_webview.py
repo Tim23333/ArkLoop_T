@@ -1227,7 +1227,9 @@ def main() -> None:
                 try:
                     ws = get_ws_time_source()
                     fc, game_time, mem_ok = ws.latest()
-                    connected = ws.is_connected()
+                    # Use is_fresh() (data < 2s old) instead of is_connected()
+                    # so brief reconnects don't flip the display to "未连接".
+                    connected = ws.is_fresh()
                     if mem_ok:
                         good_fc = int(fc)
                         good_game_time = float(game_time)
