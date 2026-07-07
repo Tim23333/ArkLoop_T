@@ -7,6 +7,10 @@ interface WorkspaceProps {
   wsTimeSec?: number
   wsFrameCount?: number
   wsConnected?: boolean
+  wsMemOk?: boolean
+  wsCycle?: number
+  wsTick?: number
+  wsTickMax?: number
 }
 
 const RECAPTURE_MESSAGES = [
@@ -26,7 +30,7 @@ const RECAPTURE_MESSAGES = [
  *   cycles through {@link RECAPTURE_MESSAGES} on each open. Click the bubble
  *   to recapture; click anywhere else (or the close ×) to dismiss the bubble.
  */
-export function Workspace({ mapCode, onCapture, wsTimeSec = 0, wsFrameCount = 0, wsConnected = false }: WorkspaceProps) {
+export function Workspace({ mapCode, onCapture, wsTimeSec = 0, wsFrameCount = 0, wsConnected = false, wsMemOk = false, wsCycle = 0, wsTick = 0, wsTickMax = 30 }: WorkspaceProps) {
   const [imgUrl, setImgUrl] = useState<string>('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>('')
@@ -77,8 +81,11 @@ export function Workspace({ mapCode, onCapture, wsTimeSec = 0, wsFrameCount = 0,
     <div className="absolute top-1 left-1 z-50 pointer-events-none font-mono text-[10px] leading-tight px-1.5 py-1 rounded bg-black/60 text-white/80 space-y-0.5">
       <div>帧: {wsFrameCount}</div>
       <div>时间: {wsTimeSec.toFixed(3)}s</div>
+      <div>周期: {wsCycle} 帧号: {wsTick}</div>
+      <div>TICK_MAX: {wsTickMax}</div>
       <div className={wsConnected ? 'text-accent-green' : 'text-accent-red'}>
         {wsConnected ? '● 已连接' : '○ 未连接'}
+        {wsConnected && !wsMemOk ? ' (内存未就绪)' : ''}
       </div>
     </div>
   )

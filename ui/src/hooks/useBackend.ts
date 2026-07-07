@@ -146,6 +146,7 @@ export function useBackend() {
           game_time?: number
           frame_count?: number
           connected?: boolean
+          mem_ok?: boolean
         }
         setState((prev) => ({
           ...(prev ?? {}),
@@ -154,6 +155,7 @@ export function useBackend() {
           game_time_sec: gt.game_time ?? 0,
           frame_count: gt.frame_count ?? 0,
           ws_connected: gt.connected ?? false,
+          ws_mem_ok: gt.mem_ok ?? false,
         }) as BackendState)
       } else if (event.event_type === 'axis') {
         setAxis((event.data as unknown as AxisAction[]) ?? [])

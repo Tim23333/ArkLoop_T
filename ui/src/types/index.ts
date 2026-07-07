@@ -31,6 +31,7 @@ export interface BackendState {
   game_time_sec?: number
   frame_count?: number
   ws_connected?: boolean
+  ws_mem_ok?: boolean
 }
 
 export interface OperatorInfo {

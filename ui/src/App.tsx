@@ -758,6 +758,10 @@ export default function App() {
           wsTimeSec={gameTimeSec}
           wsFrameCount={frameCount}
           wsConnected={wsConnected}
+          wsMemOk={state?.ws_mem_ok ?? false}
+          wsCycle={state?.current_cycle ?? 0}
+          wsTick={state?.current_tick ?? 0}
+          wsTickMax={maxTick}
         />
       </div>
 
