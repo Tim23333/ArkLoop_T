@@ -24,10 +24,12 @@ class DirectionType(Enum):
 
 @dataclasses.dataclass(order=True)
 class Action:
-    # `cycle` is the cost-bar wrap counter — monotonic, derived from the
-    # calibrated tick detector (NOT the in-game cost number, which fluctuates
-    # as operators are deployed).  Together with `tick` it forms the execution
-    # time axis: total_frames = cycle * TICK_MAX + tick.
+    # Primary time field: absolute game frame count since battle start.
+    # When set, `cycle` and `tick` are derived from it via TICK_MAX.
+    frame: Optional[int] = None
+    # Legacy cost-bar fields.  Still populated for backward compat with old
+    # timelines and the perform_action/axis_runner internals that operate on
+    # GameTime(cycle, tick).  New recordings set `frame` and derive these.
     cycle: Optional[int] = None
     tick: Optional[int] = None
     action_type: Optional[ActionType] = None
@@ -41,7 +43,15 @@ class Action:
     view_pos_side: Optional[Tuple[float, float]] = None
 
     def get_game_time(self):
-        return GameTime(self.cycle, self.tick)
+        """Return GameTime for this action.
+
+        If `frame` is set (new format), decompose it via TICK_MAX.
+        Otherwise fall back to the legacy cycle/tick pair.
+        """
+        if self.frame is not None:
+            tick_max = GameTime.get_tick_max() or 30
+            return GameTime(self.frame // tick_max, self.frame % tick_max)
+        return GameTime(self.cycle or 0, self.tick or 0)
 
     def is_valid(self) -> bool:
         for field in dataclasses.fields(self):
@@ -49,9 +59,13 @@ class Action:
             if not is_valid_type(value, field.type):
                 logger.warning(f"Invalid field: {field.name}={value}")
                 return False
-        if self.cycle is None or self.cycle < 0:
-            return False
-        if self.tick is None or self.tick < 0:
+        # Accept either `frame` (new) or `cycle`+`tick` (legacy) as valid.
+        has_frame = self.frame is not None and self.frame >= 0
+        has_cycle_tick = (
+            self.cycle is not None and self.cycle >= 0
+            and self.tick is not None and self.tick >= 0
+        )
+        if not has_frame and not has_cycle_tick:
             return False
         if self.action_type is None:
             return False

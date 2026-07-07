@@ -248,6 +248,11 @@ class SemanticAction:
             "action_type": self.action_type.value,
         }
         if self.game_time:
+            # Primary: absolute frame count (new format).
+            fc = self.game_time.get("total_elapsed_frames")
+            if fc is not None:
+                out["frame"] = int(fc)
+            # Legacy cycle/tick kept for backward compat with old consumers.
             out["tick"] = self.game_time.get("tick", 0)
             out["cycle"] = self.game_time.get("cycle", 0)
         if self.oper is not None:

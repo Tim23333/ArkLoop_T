@@ -4,6 +4,8 @@ export interface AxisAction {
   pos?: string
   direction?: string
   cost?: number
+  /** Absolute frame count (new format). */
+  frame?: number
   tick: number
   cycle: number
 }

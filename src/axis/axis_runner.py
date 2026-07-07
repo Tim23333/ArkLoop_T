@@ -11,7 +11,7 @@ from src.logic.calc_view import transform_map_to_view
 from src.logic.convert_pos import convert_position
 from src.logic.analyze_time import get_game_time, set_game_time_observer, set_time_source
 from src.logic.game_time import GameTime
-from src.logic.ws_time_source import get_ws_time_source
+from src.logic.ws_time_source import get_ws_time_source  # noqa: F401
 from src.logic.perform_action import perform_action, PerformLateError, UserPausedError
 from src.logger import logger
 from src.utils.error_to_log import ErrorToLog
@@ -402,10 +402,17 @@ class AxisRunner:
                     logger.info("Paused/stopped, stopping runner.")
                     break
 
+                # Compute frame_offset for resume: frame_offset = cycle_offset * max_tick.
+                tick_max = GameTime.get_tick_max()
+                frame_offset = self.cycle_offset * tick_max
+
                 # Skip actions that the user has already passed on a previous
                 # session (paused-and-resumed).  Still fold them into the state
                 # machine so the deployed set reflects the skipped region.
-                if action.cycle is not None and action.cycle < self.cycle_offset:
+                action_frame = action.frame if action.frame is not None else (
+                    (action.cycle or 0) * tick_max + (action.tick or 0)
+                )
+                if action_frame < frame_offset:
                     self._register_skipped_action(action, map_height, map_width)
                     continue
 
@@ -415,12 +422,13 @@ class AxisRunner:
                     logger.info("Terminating the program")
                     break
 
+                # Target frame for this action (relative to time source origin).
+                target_frame = action_frame - frame_offset
+
                 # Wait for any breakpoint that falls before this action; when
                 # reached, _await_breakpoints_until returns with is_paused() True
                 # and the same stop-and-notify flow as the UI Pause button.
-                tick_max = GameTime.get_tick_max()
-                target_total = (action.cycle - self.cycle_offset) * tick_max + action.tick
-                bp_idx = self._await_breakpoints_until(bp_idx, target_total)
+                bp_idx = self._await_breakpoints_until(bp_idx, target_frame)
 
                 if self.is_paused():
                     logger.info("Paused/stopped after breakpoint check, stopping runner.")
@@ -428,23 +436,25 @@ class AxisRunner:
 
                 # Skip actions whose scheduled time has already passed. This
                 # happens when playback is paused and resumed: the runner is
-                # recreated and only knows the cycle offset, not which actions
+                # recreated and only knows the frame offset, not which actions
                 # were already executed. Re-executing a DEPLOY after the operator
                 # is already on the map will fail avatar matching in the deploy
                 # bar.
-                current_gt = get_game_time()
-                current_total = current_gt.cycle * tick_max + current_gt.tick
-                if current_total > target_total + actionconfig.FRAME_THRESHOLD:
+                ws = get_ws_time_source()
+                current_frame = ws.latest()[0]  # frame_count from WS
+                if current_frame > target_frame + actionconfig.FRAME_THRESHOLD:
                     logger.warning(
                         f"Skipping action {action} because its scheduled time has passed "
-                        f"(current={current_total}, target={target_total})"
+                        f"(current={current_frame}, target={target_frame})"
                     )
                     self._register_skipped_action(action, map_height, map_width)
                     continue
 
                 # Bias action time so perform_action's wait loops compare to
-                # the in-game time_source (which restarts at cycle 0).
-                action.cycle = action.cycle - self.cycle_offset
+                # the in-game time_source (which restarts at frame 0).
+                action.frame = target_frame
+                if action.cycle is not None:
+                    action.cycle = action.cycle - self.cycle_offset
 
                 # Calculate the tile position from raw position
                 convert_position(action, map_height, map_width)

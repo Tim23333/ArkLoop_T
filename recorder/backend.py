@@ -142,6 +142,11 @@ class AxisBuilder:
 
     def _to_axis_dict(self, sa: SemanticAction) -> Dict[str, Any]:
         out = sa.to_axis_dict(self.map_height)
+        # Primary time field: absolute frame count with resume offset.
+        raw_frame = sa.game_time.get("total_elapsed_frames", 0) if sa.game_time else 0
+        frame_offset = self.cycle_offset * self.max_tick
+        out["frame"] = (raw_frame or 0) + frame_offset
+        # Legacy cycle with offset (kept for backward compat).
         raw_cycle = sa.game_time.get("cycle", 0) if sa.game_time else 0
         out["cycle"] = (raw_cycle or 0) + self.cycle_offset
         return out
