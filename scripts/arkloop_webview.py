@@ -524,6 +524,74 @@ class ArkLoopApi:
             logger.exception(f"Failed to rename timeline: {exc}")
             return old_name
 
+    def export_timeline(self, name: str) -> bool:
+        """Open a native save dialog and write the timeline JSON to the chosen path.
+
+        Returns True on success, False on cancel or error.
+        """
+        try:
+            src = (timelines_dir / name.strip()).resolve()
+            if src.parent.resolve() != timelines_dir.resolve() or not src.is_file():
+                return False
+            import webview as _wv
+            result = self.window.create_file_dialog(
+                _wv.SAVE_DIALOG,
+                save_filename=name,
+                file_types=('JSON files (*.json)',),
+            )
+            if not result:
+                return False
+            target = result if isinstance(result, str) else result[0]
+            with open(src, "r", encoding="utf-8") as f:
+                data = f.read()
+            Path(target).parent.mkdir(parents=True, exist_ok=True)
+            with open(target, "w", encoding="utf-8", newline="\n") as f:
+                f.write(data)
+            logger.info(f"Exported timeline {name} to {target}")
+            return True
+        except Exception as exc:
+            logger.exception(f"export_timeline failed: {exc}")
+            return False
+
+    def import_timeline(self) -> str:
+        """Open a native open dialog, read a JSON timeline, and copy it into timelines/.
+
+        Returns the imported timeline filename (e.g. ``"my_timeline.json"``),
+        or ``""`` on cancel / invalid file / error.
+        """
+        try:
+            import webview as _wv
+            result = self.window.create_file_dialog(
+                _wv.OPEN_DIALOG,
+                file_types=('JSON files (*.json)',),
+            )
+            if not result:
+                return ""
+            src = result if isinstance(result, str) else result[0]
+            with open(src, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict) or "actions" not in data:
+                logger.warning(f"import_timeline: not a valid timeline JSON: {src}")
+                return ""
+            # Use the source filename; handle collisions with (N) suffix.
+            name = os.path.basename(src)
+            if not name.endswith(".json"):
+                name += ".json"
+            timelines_dir.mkdir(parents=True, exist_ok=True)
+            target = timelines_dir / name
+            stem, ext = os.path.splitext(name)
+            counter = 1
+            while target.exists():
+                target = timelines_dir / f"{stem}({counter}){ext}"
+                counter += 1
+            with open(target, "w", encoding="utf-8", newline="\n") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            logger.info(f"Imported timeline from {src} as {target.name}")
+            return target.name
+        except Exception as exc:
+            logger.exception(f"import_timeline failed: {exc}")
+            return ""
+
     def get_app_config(self) -> Dict[str, Any]:
         """Return the contents of ``config.json`` (MuMu install path etc.).
 

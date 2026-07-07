@@ -60,6 +60,8 @@ export interface PyWebviewApi {
   delete_timeline: (name: string) => Promise<boolean>
   duplicate_timeline: (name: string) => Promise<string>
   rename_timeline: (oldName: string, newName: string) => Promise<string>
+  export_timeline: (name: string) => Promise<boolean>
+  import_timeline: () => Promise<string>
   get_pinned_timelines: () => Promise<string[]>
   set_pinned_timelines: (pinned: string[]) => Promise<boolean>
   get_window_bounds: () => Promise<{ x: number; y: number; width: number; height: number }>
@@ -258,6 +260,16 @@ export function useBackend() {
     return api.duplicate_timeline(name)
   }, [api])
 
+  const exportTimeline = useCallback(async (name: string) => {
+    if (!api) return false
+    return api.export_timeline(name)
+  }, [api])
+
+  const importTimeline = useCallback(async () => {
+    if (!api) return ''
+    return api.import_timeline()
+  }, [api])
+
   const getPinnedTimelines = useCallback(async () => {
     if (!api) return []
     return api.get_pinned_timelines()
@@ -395,6 +407,8 @@ export function useBackend() {
     deleteTimeline,
     renameTimeline,
     duplicateTimeline,
+    exportTimeline,
+    importTimeline,
     getPinnedTimelines,
     setPinnedTimelines,
     getWindowBounds,

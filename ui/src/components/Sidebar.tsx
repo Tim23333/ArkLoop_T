@@ -14,6 +14,8 @@ interface SidebarProps {
   onRename: (oldName: string, newName: string) => void
   onDelete: (name: string) => void
   onDuplicate: (name: string) => void
+  onExport: (name: string) => void
+  onImport: () => void
   onOpenSettings?: () => void
 }
 
@@ -40,6 +42,8 @@ export function Sidebar({
   onRename,
   onDelete,
   onDuplicate,
+  onExport,
+  onImport,
   onOpenSettings,
 }: SidebarProps) {
   const [menuState, setMenuState] = useState<MenuState | null>(null)
@@ -167,15 +171,23 @@ export function Sidebar({
         )}
       </div>
 
-      {/* New timeline button */}
-      <div className="px-2.5 pb-2 shrink-0">
+      {/* New timeline + Import buttons */}
+      <div className="px-2.5 pb-2 shrink-0 flex gap-1.5">
         <button
           onClick={onNewTimeline}
           disabled={isLoading}
-          className="w-full h-8 flex items-center gap-2.5 px-2.5 rounded bg-[#15171A] border border-border-panel hover:border-[#2A313A] transition-colors disabled:opacity-40"
+          className="flex-1 h-8 flex items-center gap-2.5 px-2.5 rounded bg-[#15171A] border border-border-panel hover:border-[#2A313A] transition-colors disabled:opacity-40"
         >
           <span className="text-base leading-none text-text-dim">+</span>
           <span className="text-xs text-text-dim">new TimeLine</span>
+        </button>
+        <button
+          onClick={onImport}
+          disabled={isLoading}
+          title="导入时间轴 JSON"
+          className="shrink-0 h-8 px-2.5 rounded bg-[#15171A] border border-border-panel hover:border-[#2A313A] transition-colors disabled:opacity-40 text-xs text-text-dim"
+        >
+          导入
         </button>
       </div>
 
@@ -237,6 +249,15 @@ export function Sidebar({
             }}
           >
             Duplicate
+          </button>
+          <button
+            className="w-full text-left px-3 py-1.5 text-text-muted hover:bg-[#222A31] hover:text-text-primary"
+            onClick={() => {
+              onExport(menuState.name)
+              setMenuState(null)
+            }}
+          >
+            Export
           </button>
           <button
             className="w-full text-left px-3 py-1.5 text-text-muted hover:bg-[#222A31] hover:text-accent-red"

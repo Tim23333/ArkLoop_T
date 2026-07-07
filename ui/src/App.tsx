@@ -113,6 +113,8 @@ export default function App() {
     deleteTimeline,
     renameTimeline,
     duplicateTimeline,
+    exportTimeline,
+    importTimeline,
     getPinnedTimelines,
     setPinnedTimelines,
     getWindowBounds,
@@ -444,6 +446,21 @@ export default function App() {
     [duplicateTimeline, refreshTimelines],
   )
 
+  const handleExport = useCallback(
+    async (name: string) => {
+      await exportTimeline(name)
+    },
+    [exportTimeline],
+  )
+
+  const handleImport = useCallback(async () => {
+    const imported = await importTimeline()
+    if (imported) {
+      await refreshTimelines()
+      setSelectedTimeline(imported)
+    }
+  }, [importTimeline, refreshTimelines])
+
   const handleDelete = useCallback(
     async (name: string) => {
       await deleteTimeline(name)
@@ -731,6 +748,8 @@ export default function App() {
           onRename={handleRename}
           onDelete={handleDelete}
           onDuplicate={handleDuplicate}
+          onExport={handleExport}
+          onImport={handleImport}
           onOpenSettings={() => setShowSettings(true)}
         />
         <Workspace
