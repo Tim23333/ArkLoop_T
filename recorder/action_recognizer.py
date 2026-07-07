@@ -814,6 +814,9 @@ class ActionRecognizer:
         """
         if self.view_detector is None:
             return
+        if not hasattr(frame, 'ndim'):
+            logger.warning(f"update_view: expected ndarray, got {type(frame).__name__}")
+            return
         self._set_view(bool(self.view_detector(frame)), source="ocr")
 
     def _select_oper(self, oper: str, source: str) -> None:

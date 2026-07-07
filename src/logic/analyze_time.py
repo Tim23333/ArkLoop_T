@@ -37,6 +37,8 @@ def get_game_time() -> int:
     """Return current absolute ``frame_count`` from the WS time feed.
 
     Returns 0 when the feed has never delivered a message.
+
+    This is a snapshot read — no lock, no contention with the recv thread.
     """
     ws = get_ws_time_source()
     frame = ws.get_game_time()
@@ -49,3 +51,14 @@ def get_game_time() -> int:
             logger.debug("game-time observer failed", exc_info=True)
 
     return int(frame)
+
+
+def wait_for_game_time_update(timeout: float = 0.01) -> bool:
+    """Block until the WS feed delivers a new frame or *timeout* elapses.
+
+    Returns True if fresh data arrived, False on timeout.
+    Use this in frame-stepping loops instead of ``time.sleep`` to react
+    to new frames immediately rather than polling at a fixed interval.
+    """
+    ws = get_ws_time_source()
+    return ws.wait_for_update(timeout=timeout)

@@ -6,7 +6,7 @@ from src.config import GameRatioConfig as ratioconfig
 from src.config import PerformActionConfig as actionconfig
 from src.logic.action import Action, ActionType, DirectionType
 from src.logic.locate_avatar import locate_avatar
-from src.logic.analyze_time import get_game_time
+from src.logic.analyze_time import get_game_time, wait_for_game_time_update
 from src.mumu.mumu_controller import (
     pause,
     esc,
@@ -43,6 +43,8 @@ def wait_until_threshold(
         if user_paused():
             pause()
             raise UserPausedError()
+        # Block until the WS feed delivers a new frame instead of busy-polling.
+        wait_for_game_time_update(timeout=0.01)
 
 
 def perform_deploy(
@@ -84,7 +86,8 @@ def perform_deploy(
     # Now, proceed frame by frame until we reach the target time
     while get_game_time() < target_frame:
         pause()
-        time.sleep(actionconfig.FRAME_WAITTIME)
+        # Wait for the next WS frame instead of a fixed sleep.
+        wait_for_game_time_update(timeout=0.05)
         esc()
         if user_paused():
             raise UserPausedError()
@@ -221,7 +224,8 @@ def perform_select(
     # Now, proceed frame by frame until we reach the target time
     while get_game_time() < target_frame:
         pause()
-        time.sleep(actionconfig.FRAME_WAITTIME)
+        # Wait for the next WS frame instead of a fixed sleep.
+        wait_for_game_time_update(timeout=0.05)
         esc()
         if user_paused():
             raise UserPausedError()

@@ -597,8 +597,15 @@ export default function App() {
       }
       return backendAxis
     }
+    if (isPlaying && frameOffset > 0) {
+      // During playback the runner subtracts frameOffset from each action's
+      // frame so that execution happens at game frame (action.frame - offset).
+      // Show the adjusted frames so the timeline blocks align with the playhead
+      // (which tracks the live game frame from WS).
+      return loadedAxis.map((a) => ({ ...a, frame: (a.frame ?? 0) - frameOffset }))
+    }
     return loadedAxis
-  }, [isRecording, backendAxis, loadedAxis, frameOffset])
+  }, [isRecording, isPlaying, backendAxis, loadedAxis, frameOffset])
 
   // Unique operator names deployed in the current timeline, in first-seen
   // order.  Derived from displayedAxis so it updates live during recording

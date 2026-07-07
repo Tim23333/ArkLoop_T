@@ -11,6 +11,13 @@ This module owns a process-wide singleton started once at app startup and read
 by ``analyze_time.get_game_time()`` in both recording and playback.  The URL is
 user-configurable (``config.json`` -> ``time_source.ws_url``); it is NOT
 hardcoded.
+
+Architecture — lock-free hot path:
+  The recv thread writes to a shared tuple via an atomic reference swap
+  (``_data = (fc, gt, ok)``).  No lock is held during the swap, so the recv
+  loop is never blocked by readers.  A ``threading.Event`` (``_data_event``)
+  is set on every new message so that ``wait_for_update()`` can sleep until
+  fresh data arrives instead of busy-polling.
 """
 
 from __future__ import annotations
@@ -18,7 +25,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from src.logger import logger
 
@@ -36,30 +43,41 @@ DEFAULT_WS_URL = "ws://127.0.0.1:59555"
 class WSTimeSource:
     """Process-wide WebSocket time client.
 
-    A single background thread runs ``WebSocketApp.run_forever`` with auto
-    reconnect.  The latest parsed message is cached under ``_data_lock``;
-    readers (``get_game_time``, ``latest``, ``status``) never block on the
-    network.
+    Design principles
+    -----------------
+    * **Lock-free hot path** — the recv thread writes to ``_data`` via an
+      atomic reference swap (Python GIL guarantees atomicity for a single
+      attribute store).  No lock is ever held in the recv callback.
+    * **Event notification** — ``_data_event`` (a ``threading.Event``) is set
+      on every new message.  Callers that need to wait for fresh data
+      (e.g. the frame-stepping loop in ``perform_action``) can call
+      ``wait_for_update(timeout)`` which blocks on the event instead of
+      busy-polling with ``time.sleep``.
+    * **Snapshot reads** — ``latest()`` and ``get_game_time()`` read the
+      ``_data`` reference once (GIL-atomic) and return immediately.
     """
 
     def __init__(self, url: str = DEFAULT_WS_URL) -> None:
         self.url = url
-        self._frame_count: int = 0
-        self._game_time: float = 0.0
-        # ``connected`` field from the last message (memory-read OK).
-        self._mem_ok: bool = False
-        # Whether the WS transport itself is open.
+        # ── lock-free data cache ──────────────────────────────────────
+        # Atomic reference swap: the recv thread stores a new tuple;
+        # readers load the reference once and unpack.  No lock needed.
+        # (frame_count, game_time, mem_ok)
+        self._data: Tuple[int, float, bool] = (0, 0.0, False)
+        # Signalled on every new WS message.  Cleared by waiters.
+        self._data_event = threading.Event()
+        # ── connection state (protected by _conn_lock) ────────────────
         self._connected: bool = False
         self._ever_received: bool = False
-        self._data_lock = threading.Lock()
+        self._conn_lock = threading.Lock()
+        # Timestamp of the last received message (time.monotonic).
+        self._last_msg_time: float = 0.0
+        self._time_lock = threading.Lock()
+        # ── WS lifecycle ──────────────────────────────────────────────
         self._callback: Optional[Callable[[int, float, bool], None]] = None
         self._ws: Optional[Any] = None
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
-        # Timestamp of the last received message (time.monotonic).  Used to
-        # implement a grace period: briefly disconnected → keep pushing last
-        # known data instead of immediately flipping to "未连接".
-        self._last_msg_time: float = 0.0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -107,13 +125,13 @@ class WSTimeSource:
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
-        with self._data_lock:
+        with self._conn_lock:
             self._connected = False
         logger.info("WSTimeSource stopped")
 
     def set_callback(self, callback: Optional[Callable[[int, float, bool], None]]) -> None:
         """Register a callback ``(frame_count, game_time, mem_ok)`` fired on every
-        new WS message, outside the data lock.  Only one callback at a time."""
+        new WS message, outside any lock.  Only one callback at a time."""
         self._callback = callback
 
     def _run(self) -> None:
@@ -135,24 +153,27 @@ class WSTimeSource:
             self._stop.wait(0.1)
 
     # ------------------------------------------------------------------
-    # WebSocketApp callbacks (run in the background thread)
+    # WebSocketApp callbacks (run in the background recv thread)
     # ------------------------------------------------------------------
     def _on_open(self, _ws: Any) -> None:
-        with self._data_lock:
+        with self._conn_lock:
             self._connected = True
         logger.info(f"WSTimeSource connected to {self.url}")
 
     def _on_close(self, _ws: Any, *args: Any) -> None:
-        with self._data_lock:
+        with self._conn_lock:
             self._connected = False
         logger.warning("WSTimeSource connection closed")
 
     def _on_error(self, _ws: Any, exc: Any) -> None:
-        with self._data_lock:
+        with self._conn_lock:
             self._connected = False
         logger.warning(f"WSTimeSource error: {exc}")
 
     def _on_message(self, _ws: Any, message: Any) -> None:
+        # ── LOCK-FREE HOT PATH ────────────────────────────────────────
+        # Parse JSON and store via atomic reference swap.  No lock is held
+        # so the recv loop is never blocked by readers.
         try:
             data = json.loads(message)
         except (ValueError, TypeError) as exc:
@@ -169,32 +190,39 @@ class WSTimeSource:
         except (TypeError, ValueError):
             game_time = 0.0
         mem_ok = bool(data.get("connected", False))
-        with self._data_lock:
-            self._frame_count = frame_count
-            self._game_time = game_time
-            self._mem_ok = mem_ok
-            self._ever_received = True
+        # Atomic reference swap (GIL-protected).  Readers that load _data
+        # before this assignment see the old tuple; readers after see the
+        # new one.  No torn reads possible.
+        self._data = (frame_count, game_time, mem_ok)
+        # Signal waiters that fresh data is available.
+        self._data_event.set()
+        # Update last-message timestamp (separate lock, non-blocking).
+        with self._time_lock:
             self._last_msg_time = time.monotonic()
-        # NO callback / evaluate_js here — that would block the recv loop and
-        # cause buffer accumulation at 125 Hz.  The display thread polls the
-        # cache at a fixed rate instead.
+        if not self._ever_received:
+            with self._conn_lock:
+                self._ever_received = True
+        # NO callback / evaluate_js here — that would block the recv loop
+        # and cause buffer accumulation at 125 Hz.
 
     # ------------------------------------------------------------------
-    # Reads (thread-safe, non-blocking)
+    # Reads (snapshot, non-blocking)
     # ------------------------------------------------------------------
     def latest(self) -> Tuple[int, float, bool]:
-        """Return ``(frame_count, game_time, mem_ok)`` from the last message."""
-        with self._data_lock:
-            return self._frame_count, self._game_time, self._mem_ok
+        """Return ``(frame_count, game_time, mem_ok)`` from the last message.
+
+        This is a single atomic reference load — no lock, no contention.
+        """
+        return self._data
 
     def is_connected(self) -> bool:
         """True if the WS transport is open AND at least one message arrived."""
-        with self._data_lock:
+        with self._conn_lock:
             return self._connected and self._ever_received
 
     @property
     def ever_received(self) -> bool:
-        with self._data_lock:
+        with self._conn_lock:
             return self._ever_received
 
     def is_fresh(self, max_age: float = 2.0) -> bool:
@@ -204,7 +232,7 @@ class WSTimeSource:
         brief disconnects / reconnects — if data is less than 2 s old it's
         still "live" even if the transport is momentarily down.
         """
-        with self._data_lock:
+        with self._time_lock:
             return self._ever_received and (time.monotonic() - self._last_msg_time) < max_age
 
     def wait_connected(self, timeout: float = 5.0) -> bool:
@@ -216,20 +244,33 @@ class WSTimeSource:
             self._stop.wait(0.05)
         return self.is_connected()
 
+    def wait_for_update(self, timeout: float = 0.01) -> bool:
+        """Block until a new WS message arrives or *timeout* elapses.
+
+        Returns True if fresh data is available, False on timeout.
+        The event is auto-cleared after waking so the next call blocks again.
+        Signalled by ``_on_message`` (recv thread) — no polling needed.
+        """
+        signalled = self._data_event.wait(timeout=timeout)
+        if signalled:
+            self._data_event.clear()
+        return signalled
+
     def get_game_time(self) -> int:
         """Return the latest absolute ``frame_count`` from the WS feed.
 
         Returns the last known value when the feed is briefly interrupted so
         callers in bullet-time / frame-stepping loops keep working off a cached
         reading rather than crashing.
+
+        This is a snapshot read — no lock, no contention.
         """
-        frame_count, _game_time, _mem_ok = self.latest()
-        return int(frame_count)
+        return int(self._data[0])
 
     def status(self) -> Dict[str, Any]:
         """Snapshot for the UI: connection + latest reading + configured URL."""
-        frame_count, game_time, mem_ok = self.latest()
-        with self._data_lock:
+        frame_count, game_time, mem_ok = self._data
+        with self._conn_lock:
             connected = self._connected
             ever = self._ever_received
         return {

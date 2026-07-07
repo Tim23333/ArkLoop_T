@@ -517,10 +517,10 @@ class ActionBackend:
                     tick_state = None
                     try:
                         ws = get_ws_time_source()
-                        frame = ws.get_game_time()
+                        ws_frame = ws.get_game_time()
                         fc, game_time, mem_ok = ws.latest()
                         tick_state = {
-                            "frame": int(frame),
+                            "frame": int(ws_frame),
                             "game_time": float(game_time),
                             "connected": bool(mem_ok),
                         }
