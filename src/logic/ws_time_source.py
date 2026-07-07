@@ -53,6 +53,7 @@ class WSTimeSource:
         self._connected: bool = False
         self._ever_received: bool = False
         self._data_lock = threading.Lock()
+        self._callback: Optional[Callable[[int, float, bool], None]] = None
         self._ws: Optional[Any] = None
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -106,6 +107,11 @@ class WSTimeSource:
         with self._data_lock:
             self._connected = False
         logger.info("WSTimeSource stopped")
+
+    def set_callback(self, callback: Optional[Callable[[int, float, bool], None]]) -> None:
+        """Register a callback ``(frame_count, game_time, mem_ok)`` fired on every
+        new WS message, outside the data lock.  Only one callback at a time."""
+        self._callback = callback
 
     def _run(self) -> None:
         # run_forever handles reconnect internally; the stop_event is checked
@@ -161,6 +167,14 @@ class WSTimeSource:
             self._game_time = game_time
             self._mem_ok = mem_ok
             self._ever_received = True
+            cb = self._callback
+        # Fire callback outside the lock so a slow handler doesn't block
+        # the WS receiver thread from processing the next message.
+        if cb is not None:
+            try:
+                cb(frame_count, game_time, mem_ok)
+            except Exception:
+                logger.debug("WSTimeSource callback error", exc_info=True)
 
     # ------------------------------------------------------------------
     # Reads (thread-safe, non-blocking)

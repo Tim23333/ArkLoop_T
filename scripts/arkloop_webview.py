@@ -9,6 +9,21 @@ Usage:
 
 from __future__ import annotations
 
+# Add MAA's DLL directory to the Windows search path BEFORE any maa imports.
+# PyInstaller bundles MaaFramework.dll + DirectML.dll + onnxruntime_maa.dll
+# under _internal/maa/bin/ but the DLL loader doesn't search there by default,
+# causing "Failed to load dynlib/dll 'MaaFramework.dll'" in the frozen EXE.
+import os as _os, sys as _sys
+if _sys.platform == "win32":
+    _maa_bin = (
+        _os.path.join(_sys._MEIPASS, "maa", "bin")
+        if getattr(_sys, "frozen", False)
+        else _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                           "..", ".venv", "Lib", "site-packages", "maa", "bin")
+    )
+    if _os.path.isdir(_maa_bin):
+        _os.add_dll_directory(_maa_bin)
+
 import base64
 import json
 import mimetypes
@@ -369,6 +384,25 @@ class ArkLoopApi:
                 ws = get_ws_time_source()
                 ws.start(url=ws_url)
                 logger.info(f"WS time source started (url={ws_url})")
+
+                # Event-driven: push game_time to the frontend immediately
+                # when the WS server sends new data, instead of polling at a
+                # fixed rate.  Only pushes when frame_count actually changes.
+                def _on_ws_frame(fc: int, game_time: float, mem_ok: bool) -> None:
+                    if fc == _on_ws_frame.last_fc:
+                        return
+                    _on_ws_frame.last_fc = fc
+                    tick_max = GameTime.get_tick_max() or 30
+                    self._push_event("game_time", {
+                        "cycle": fc // tick_max,
+                        "tick":   fc %  tick_max,
+                        "frame_count": fc,
+                        "game_time": game_time,
+                        "connected": ws.is_connected(),
+                        "mem_ok": mem_ok,
+                    })
+                _on_ws_frame.last_fc = -1  # type: ignore[attr-defined]
+                ws.set_callback(_on_ws_frame)
             except Exception as exc:
                 logger.warning(f"Failed to start WS time source: {exc}")
 
@@ -1199,54 +1233,18 @@ def main() -> None:
     signal.signal(signal.SIGINT, lambda _s, _f: api.close_window())
 
     # Periodically push state while recording.
-    #
-    # Two rates: the WS time source pushes (cycle, tick) at the game's native
-    # rate, so we ship a *lightweight* `game_time` event at 30 Hz (only when it
-    # actually changes) for a smooth playhead — and the heavier full `state` +
-    # axis only at ~10 Hz, which is plenty for recognizer status.  The WS feed
-    # is live even when not recording, so the playhead shows whenever the game
-    # time service is connected.
+    # Periodically push state while recording.
+    # game_time is now pushed by the WS callback (event-driven, no polling).
+    # This publisher only handles:
+    #   - ws_status changes (for the settings UI)
+    #   - full state + axis while recording (~10 Hz)
     def _state_publisher() -> None:
         last_axis_len: int = 0
         last_ws_status: Optional[Dict[str, Any]] = None
-        # Held-last-good: when the server's memory read briefly reports not-OK
-        # (mem_ok=false), hold the last good frame_count/game_time so the
-        # readout doesn't flash to 0.  Push unconditionally at 30 Hz so the
-        # frontend always gets a fresh update — no "push only on change" gating
-        # that would freeze the display when mem_ok toggles.
-        good_fc: int = -1
-        good_game_time: float = 0.0
-        good_cycle: int = 0
-        good_tick: int = 0
         slow_counter = 0
         while True:
             time.sleep(0.016)  # 16 ms, ~60 Hz
             try:
-                # Fast lane: lightweight cycle/tick + WS game_time/frame_count,
-                # pushed at 30 Hz regardless of whether the value changed.
-                # Available with or without an active backend — the playhead +
-                # time readout show whenever the game time service is connected.
-                try:
-                    ws = get_ws_time_source()
-                    gt = ws.get_game_time()
-                    fc, game_time, mem_ok = ws.latest()
-                    connected = ws.is_connected()
-                    if mem_ok:
-                        good_fc = int(fc)
-                        good_game_time = float(game_time)
-                        good_cycle = int(gt.cycle)
-                        good_tick = int(gt.tick)
-                    api._push_event("game_time", {
-                        "cycle": good_cycle,
-                        "tick": good_tick,
-                        "frame_count": good_fc,
-                        "game_time": good_game_time,
-                        "connected": connected,
-                        "mem_ok": bool(mem_ok),
-                    })
-                except Exception:
-                    pass
-
                 # Surface WS connection status changes (for the settings UI).
                 try:
                     status = get_ws_time_source().status()
