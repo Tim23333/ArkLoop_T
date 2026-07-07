@@ -160,13 +160,13 @@ class AxisRunner:
             self.stop_event.set()
 
     def _apply_settings(self):
-        """Apply top-level settings to global config and GameTime."""
-        # max_tick from settings is a manual override; calibration is the
-        # source of truth and is applied in ``run()`` before this is called.
-        max_tick = self.settings.get("max_tick")
-        if max_tick is not None:
-            GameTime.set_tick_max(max_tick)
+        """Apply top-level settings to global config.
 
+        TICK_MAX is NOT set here — the timeline uses absolute frame_count,
+        and the (cycle, tick) decomposition is purely for display.  Changing
+        TICK_MAX mid-session would cause the debug overlay to flicker between
+        different decompositions.
+        """
         wait_time1 = self.settings.get("wait_time1")
         if wait_time1 is not None:
             actionconfig.MINIMUM_WAITTIME = wait_time1
@@ -316,9 +316,10 @@ class AxisRunner:
                 "时间源 WS 未连接，无法回放。请在设置中配置正确的 WS 地址并启动游戏时间服务。"
             )
 
-        # TICK_MAX drives the (cycle, tick) decomposition of frame_count.
-        # It is a per-timeline setting (default 30); no calibration needed.
-        GameTime.set_tick_max(int(self.settings.get("max_tick") or 30))
+        # TICK_MAX stays at the default (30).  It's only used for the
+        # cycle/tick display decomposition; execution uses frame_count
+        # directly.  Do NOT set it from settings.max_tick — that was a
+        # cost-bar-era setting that would cause the debug overlay to jump.
         set_time_source(ws)  # no-op compat; documents intent
 
         self._apply_settings()
