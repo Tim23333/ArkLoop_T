@@ -293,7 +293,7 @@ class ActionBackend:
         # Continuous frame capture
         if FrameSource is not None:
             try:
-                self.frame_source = FrameSource(fps=30).start()
+                self.frame_source = FrameSource(fps=60).start()
             except Exception as exc:
                 logger.warning(f"Failed to start frame source: {exc}")
 
