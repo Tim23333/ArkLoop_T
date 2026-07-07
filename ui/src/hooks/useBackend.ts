@@ -132,7 +132,10 @@ export function useBackend() {
       const event = data as BackendEvent
       setEvents((prev) => [...prev, event])
       if (event.event_type === 'state') {
-        setState(event.data as BackendState)
+        // Merge (not replace) so WS fields (ws_connected, frame_count,
+        // game_time_sec) set by game_time events are preserved.  A full
+        // replace would wipe them every ~50 ms during recording → flicker.
+        setState((prev) => ({ ...(prev ?? {}), ...event.data }) as BackendState)
       } else if (event.event_type === 'game_time') {
         // Lightweight high-rate cycle/tick + WS game_time/frame_count push —
         // merge into state without discarding the heavier recognizer fields
