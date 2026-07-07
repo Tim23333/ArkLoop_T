@@ -755,6 +755,9 @@ export default function App() {
         <Workspace
           mapCode={timelineSettings.map_code}
           onCapture={captureWithGrid}
+          wsTimeSec={gameTimeSec}
+          wsFrameCount={frameCount}
+          wsConnected={wsConnected}
         />
       </div>
 

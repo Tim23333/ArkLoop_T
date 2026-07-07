@@ -3,6 +3,10 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 interface WorkspaceProps {
   mapCode?: string
   onCapture?: (mapCode: string) => Promise<string>
+  /** Debug overlay: raw WS time values for live diagnostics. */
+  wsTimeSec?: number
+  wsFrameCount?: number
+  wsConnected?: boolean
 }
 
 const RECAPTURE_MESSAGES = [
@@ -22,7 +26,7 @@ const RECAPTURE_MESSAGES = [
  *   cycles through {@link RECAPTURE_MESSAGES} on each open. Click the bubble
  *   to recapture; click anywhere else (or the close ×) to dismiss the bubble.
  */
-export function Workspace({ mapCode, onCapture }: WorkspaceProps) {
+export function Workspace({ mapCode, onCapture, wsTimeSec = 0, wsFrameCount = 0, wsConnected = false }: WorkspaceProps) {
   const [imgUrl, setImgUrl] = useState<string>('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>('')
@@ -68,17 +72,29 @@ export function Workspace({ mapCode, onCapture }: WorkspaceProps) {
     return () => document.removeEventListener('mousedown', close)
   }, [bubble])
 
+  // ── Debug overlay: WS time/frame in top-left ────────────────────
+  const debugOverlay = (
+    <div className="absolute top-1 left-1 z-50 pointer-events-none font-mono text-[10px] leading-tight px-1.5 py-1 rounded bg-black/60 text-white/80 space-y-0.5">
+      <div>帧: {wsFrameCount}</div>
+      <div>时间: {wsTimeSec.toFixed(3)}s</div>
+      <div className={wsConnected ? 'text-accent-green' : 'text-accent-red'}>
+        {wsConnected ? '● 已连接' : '○ 未连接'}
+      </div>
+    </div>
+  )
+
   // ── Empty placeholder ────────────────────────────────────────────
   if (!imgUrl) {
     return (
       <div
         onClick={() => { if (!loading) void doCapture() }}
         className={[
-          'flex-1 h-full bg-workspace border-b border-border-panel flex flex-col items-center justify-center gap-2',
+          'flex-1 h-full bg-workspace border-b border-border-panel flex flex-col items-center justify-center gap-2 relative',
           loading ? 'cursor-wait' : 'cursor-pointer',
           'hover:bg-[#0d1217] transition-colors',
         ].join(' ')}
       >
+        {debugOverlay}
         <span className="text-text-dim opacity-40 text-sm">
           {loading ? '截图中…' : '点击此处截取 MuMu 并显示坐标'}
         </span>
@@ -108,6 +124,7 @@ export function Workspace({ mapCode, onCapture }: WorkspaceProps) {
     <div
       className="flex-1 h-full bg-workspace border-b border-border-panel relative"
     >
+      {debugOverlay}
       <img
         src={imgUrl}
         alt="MuMu 截图 + 坐标"
