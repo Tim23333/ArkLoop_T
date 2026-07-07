@@ -10,9 +10,10 @@ Usage:
 from __future__ import annotations
 
 # Add MAA's DLL directory to the Windows search path BEFORE any maa imports.
-# PyInstaller bundles MaaFramework.dll + DirectML.dll + onnxruntime_maa.dll
-# under _internal/maa/bin/ but the DLL loader doesn't search there by default,
-# causing "Failed to load dynlib/dll 'MaaFramework.dll'" in the frozen EXE.
+# PyInstaller bundles MaaFramework.dll + deps under _internal/maa/bin/ but the
+# DLL loader doesn't search there by default.  os.add_dll_directory alone may
+# not work after PyInstaller's bootloader restricts the search path, so we also
+# prepend to PATH and force-load the dependency DLLs first.
 import os as _os, sys as _sys
 if _sys.platform == "win32":
     _maa_bin = (
@@ -22,7 +23,26 @@ if _sys.platform == "win32":
                            "..", ".venv", "Lib", "site-packages", "maa", "bin")
     )
     if _os.path.isdir(_maa_bin):
-        _os.add_dll_directory(_maa_bin)
+        # Belt-and-suspenders: add to PATH (always works) and add_dll_directory.
+        _os.environ["PATH"] = _maa_bin + _os.pathsep + _os.environ.get("PATH", "")
+        try:
+            _os.add_dll_directory(_maa_bin)
+        except Exception:
+            pass
+        # Force-load MaaFramework's dependencies so they're already in the
+        # process module list when MaaFramework.dll itself is loaded via ctypes.
+        import ctypes as _ctypes
+        for _dll in [
+            "MaaUtils.dll",
+            "fastdeploy_ppocr_maa.dll",
+            "onnxruntime_maa.dll",
+            "opencv_world4_maa.dll",
+            "DirectML.dll",
+        ]:
+            try:
+                _ctypes.WinDLL(_os.path.join(_maa_bin, _dll))
+            except Exception:
+                pass
 
 import base64
 import json
