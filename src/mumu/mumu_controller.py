@@ -35,10 +35,11 @@ def handle_coordinates(func):
 
 def pause() -> None:
     """
-    Pause the game by sending a specific message to the game window.
+    Pause the game by sending an ESC key to the game window.
     """
-    win32api.SendMessage(get_handle(), config.WM_XBUTTONDOWN, config.XBUTTON2, config.DEFAULT_COORDINATES)
-    win32api.SendMessage(get_handle(), config.WM_XBUTTONUP, config.XBUTTON2, config.DEFAULT_COORDINATES)
+    hwnd = get_handle()
+    win32api.SendMessage(hwnd, win32con.WM_KEYDOWN, win32con.VK_ESCAPE, 0)
+    win32api.SendMessage(hwnd, win32con.WM_KEYUP, win32con.VK_ESCAPE, 0)
 
 def esc() -> None:
     """
