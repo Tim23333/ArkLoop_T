@@ -3,52 +3,25 @@ mumu_controller.py
 This module provides functions simulate mouse events directly to the game window (mumu emulator).
 """
 
-import ctypes
 import win32api
 import win32con
 import win32gui
 import functools
 from typing import Tuple
 
-from src.config import MuMuEmulatorConfig as config
 from src.mumu.mumu_connection import get_handle
 
-# ── SendInput structures for hardware-level keyboard simulation ──────────
-INPUT_KEYBOARD = 1
-KEYEVENTF_KEYUP = 0x0002
-
-class KEYBDINPUT(ctypes.Structure):
-    _fields_ = [
-        ("wVk", ctypes.c_ushort),
-        ("wScan", ctypes.c_ushort),
-        ("dwFlags", ctypes.c_ulong),
-        ("time", ctypes.c_ulong),
-        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
-    ]
-
-class INPUT_UNION(ctypes.Union):
-    _fields_ = [("ki", KEYBDINPUT)]
-
-class INPUT(ctypes.Structure):
-    _fields_ = [
-        ("type", ctypes.c_ulong),
-        ("union", INPUT_UNION),
-    ]
-
 def _send_key(vk_code: int) -> None:
-    """Send a key press+release via SendInput (hardware-level simulation)."""
-    extra = ctypes.c_ulong(0)
-    # Key down
-    down = INPUT(type=INPUT_KEYBOARD)
-    down.union.ki = KEYBDINPUT(wVk=vk_code, dwFlags=0, dwExtraInfo=ctypes.pointer(extra))
-    # Key up
-    up = INPUT(type=INPUT_KEYBOARD)
-    up.union.ki = KEYBDINPUT(wVk=vk_code, dwFlags=KEYEVENTF_KEYUP, dwExtraInfo=ctypes.pointer(extra))
-    inputs = (INPUT * 2)(down, up)
-    ctypes.windll.user32.SendInput(2, ctypes.byref(inputs), ctypes.sizeof(INPUT))
+    """Send a key press+release directly to MuMu's render window."""
+    handle = get_handle()
+    scan = win32api.MapVirtualKey(vk_code, 0)
+    lparam_down = 1 | (scan << 16)
+    lparam_up = lparam_down | (1 << 30) | (1 << 31)
+    win32api.SendMessage(handle, win32con.WM_KEYDOWN, vk_code, lparam_down)
+    win32api.SendMessage(handle, win32con.WM_KEYUP, vk_code, lparam_up)
 
 # Public interface
-__all__ = ['pause', 'esc', 'mouseclick', 'mousedown', 'mouseup', 'mousemove']
+__all__ = ['pause', 'mouseclick', 'mousedown', 'mouseup', 'mousemove']
 
 def handle_coordinates(func):
     """
@@ -73,13 +46,6 @@ def pause() -> None:
     Pause/unpause the game by simulating an ESC key press (hardware-level).
     """
     _send_key(win32con.VK_ESCAPE)
-
-def esc() -> None:
-    """
-    Send the ESC key to the game by sending a specific message to the game window.
-    """
-    win32api.SendMessage(get_handle(), config.WM_XBUTTONDOWN, config.XBUTTON1, config.DEFAULT_COORDINATES)
-    win32api.SendMessage(get_handle(), config.WM_XBUTTONUP, config.XBUTTON1, config.DEFAULT_COORDINATES)
 
 @handle_coordinates
 def mouseclick(pos: Tuple[float, float]) -> None:
@@ -113,5 +79,5 @@ def mousemove(pos: Tuple[float, float]) -> None:
 if __name__ == "__main__":
     # Usage and testing
     from src.config import GameRatioConfig
-    esc()
+    pause()
     mouseclick(GameRatioConfig.LAST_OPER_RATIO)

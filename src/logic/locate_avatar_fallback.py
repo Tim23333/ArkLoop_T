@@ -58,8 +58,8 @@ def locate_avatar_fallback(action: Action) -> None:
     This is used as a fallback when ``cv2.matchTemplate`` fails to find the
     operator avatar in the deployment area (e.g. due to occlusion).
 
-    The game is assumed to be paused when this function is called, matching the
-    pause invariant of ``perform_deploy``.
+    This may run during playback while the battle is still advancing, so it
+    must not rely on ``perform_deploy`` pausing the game first.
     """
     if not fallbackconfig.ENABLED:
         raise ErrorToLog(f"未在待部署区找到干员{action.oper}。")

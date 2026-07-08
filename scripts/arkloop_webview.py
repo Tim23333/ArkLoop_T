@@ -123,14 +123,13 @@ class ArkLoopApi:
             if self.backend is not None:
                 return
 
-            # If the previous playback (or user click) paused the game via
-            # the esc menu (wait_until_threshold's esc() call), close that
-            # menu so recording observes a live game rather than a frozen
-            # menu overlay.
+            # If the previous playback (or user click) paused the game,
+            # toggle pause again so recording observes a live game rather
+            # than a frozen menu overlay.
             if self._game_paused_by_runner:
                 try:
-                    from src.mumu.mumu_controller import esc as game_esc
-                    game_esc()
+                    from src.mumu.mumu_controller import pause as game_pause
+                    game_pause()
                     logger.info("[recording] dismissed pause menu from breakpoint")
                 except Exception as exc:
                     logger.warning(f"Failed to dismiss pause menu: {exc}")

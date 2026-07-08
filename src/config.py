@@ -1,11 +1,6 @@
 class MuMuEmulatorConfig:
-    DEFAULT_COORDINATES = 0x00640064
     WINDOW_NAME = "MuMu模拟器12"
     SUB_WINDOW_NAME = "MuMuPlayer"
-    WM_XBUTTONDOWN = 0x020B
-    WM_XBUTTONUP = 0x020C
-    XBUTTON1 = 0x00010000
-    XBUTTON2 = 0x00020000
 
 class GameRatioConfig:
     COST_AREA_RATIO = (0.906, 0.685, 1, 0.755) # (left, top, right, bottom)
