@@ -396,6 +396,17 @@ export default function App() {
   // ── playback state ───────────────────────────────────────────
   const [isPlaying, setIsPlaying] = useState(false)
   const [autoEnter, setAutoEnter] = useState(false)
+  const [pauseResult, setPauseResult] = useState<string>('')
+
+  const handleDebugPause = useCallback(async () => {
+    if (!api) return
+    try {
+      const r = await api.debug_pause()
+      setPauseResult(`帧 ${r.frame_before}→${r.frame_after} ${r.paused ? '已暂停' : '未暂停'}`)
+    } catch (e) {
+      setPauseResult('失败')
+    }
+  }, [api])
 
   const handlePlay = useCallback(async () => {
     if (!selectedTimeline || isPlaying || isRecording) return
@@ -617,6 +628,16 @@ export default function App() {
           >
             自动进图: {autoEnter ? '开' : '关'}
           </button>
+          {/* Debug: toggle game pause */}
+          <button
+            onClick={handleDebugPause}
+            className="text-xs border border-accent-yellow text-accent-yellow rounded px-2 py-0.5 hover:bg-accent-yellow/10 transition-colors whitespace-nowrap"
+          >
+            调试暂停
+          </button>
+          {pauseResult && (
+            <span className="text-xs font-mono text-text-dim">{pauseResult}</span>
+          )}
           {/* Live game time + frame count from the WS time source.
               Idle: also shows the 续录偏移 (frameOffset) input for resume. */}
           <div className="flex items-center gap-4 text-xs font-mono">

@@ -556,6 +556,35 @@ class ArkLoopApi:
             pass
 
     # ------------------------------------------------------------------
+    # Debug
+    # ------------------------------------------------------------------
+    def debug_pause(self) -> Dict[str, Any]:
+        """Toggle game pause and return the result for debugging."""
+        from src.mumu.mumu_controller import pause as game_pause
+        frame_before = 0
+        try:
+            ws = get_ws_time_source()
+            frame_before = ws.get_game_time()
+        except Exception:
+            pass
+        game_pause()
+        import time as _time
+        _time.sleep(0.1)
+        frame_after = 0
+        try:
+            ws = get_ws_time_source()
+            frame_after = ws.get_game_time()
+        except Exception:
+            pass
+        result = {
+            "frame_before": int(frame_before),
+            "frame_after": int(frame_after),
+            "paused": frame_after <= frame_before,
+        }
+        logger.info(f"[debug_pause] {result}")
+        return result
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
     def _on_backend_event(self, event_type: str, **kwargs: Any) -> None:

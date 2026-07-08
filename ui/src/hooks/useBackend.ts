@@ -72,6 +72,7 @@ export interface PyWebviewApi {
   update_app_config: (patch: Partial<AppConfig>) => Promise<boolean>
   get_ws_status: () => Promise<WSStatus>
   restart_ws_source: (url?: string) => Promise<boolean>
+  debug_pause: () => Promise<{ frame_before: number; frame_after: number; paused: boolean }>
 }
 
 export interface AppConfig {
