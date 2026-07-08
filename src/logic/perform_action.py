@@ -47,6 +47,18 @@ def wait_until_threshold(
         wait_for_game_time_update(timeout=0.01)
 
 
+def _ensure_running(timeout: float = 0.5) -> None:
+    """Verify the game is running (frame advancing). If not, toggle pause."""
+    f1 = get_game_time()
+    time.sleep(0.05)
+    f2 = get_game_time()
+    if f2 > f1:
+        return  # already running
+    logger.warning(f"Game appears paused (frame {f1}->{f2}), toggling pause")
+    pause()
+    time.sleep(actionconfig.MINIMUM_WAITTIME)
+
+
 def perform_deploy(
     action: Action,
     user_paused: Callable[[], bool],
@@ -60,6 +72,7 @@ def perform_deploy(
         # When we have too much time, first resume, then enter bullet time when appropriate
         logger.debug(f"Too much time, resuming and entering bullet time")
         pause()
+        _ensure_running()
         wait_until_threshold(target_frame, BULLET_THRESHOLD, user_paused)
         mouseclick(ratioconfig.LAST_OPER_RATIO)
         time.sleep(actionconfig.GENERAL_WAITTIME)
@@ -72,6 +85,7 @@ def perform_deploy(
         mouseclick(ratioconfig.LAST_OPER_RATIO)
         time.sleep(actionconfig.GENERAL_WAITTIME)
         pause()
+        _ensure_running()
         wait_until_threshold(target_frame, FRAME_THRESHOLD, user_paused)
         esc()
         time.sleep(actionconfig.GENERAL_WAITTIME)
@@ -186,6 +200,7 @@ def perform_select(
         # When we have too much time, first resume, then enter bullet time when appropriate
         logger.debug(f"Too much time, resuming and entering bullet time")
         pause()
+        _ensure_running()
         wait_until_threshold(target_frame, BULLET_THRESHOLD, user_paused)
         mouseclick(action.view_pos_front)
         time.sleep(actionconfig.GENERAL_WAITTIME)
@@ -196,6 +211,7 @@ def perform_select(
         # When we are within the bullet threshold, resume and enter bullet time, quickly
         logger.debug(f"Within bullet threshold, entering bullet time")
         pause()
+        _ensure_running()
         mouseclick(action.view_pos_front)
         time.sleep(actionconfig.GENERAL_WAITTIME)
         wait_until_threshold(target_frame, FRAME_THRESHOLD, user_paused)
@@ -209,6 +225,7 @@ def perform_select(
         mouseclick(ratioconfig.LAST_OPER_RATIO)
         time.sleep(actionconfig.GENERAL_WAITTIME)
         pause()
+        _ensure_running()
         mouseclick(action.view_pos_side)
         time.sleep(actionconfig.MINIMUM_WAITTIME)
         esc()
