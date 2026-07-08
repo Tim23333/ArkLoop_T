@@ -11,7 +11,7 @@ from src.logic.calc_view import transform_map_to_view
 from src.logic.convert_pos import convert_position
 from src.logic.analyze_time import get_game_time, set_game_time_observer, set_time_source
 from src.logic.ws_time_source import get_ws_time_source
-from src.logic.perform_action import perform_action, PerformLateError, UserPausedError
+from src.logic.perform_action import perform_action, UserPausedError
 from src.logger import logger
 from src.utils.error_to_log import ErrorToLog
 
@@ -363,10 +363,6 @@ class AxisRunner:
                     perform_action(action, self.is_paused)
                     self._set_result(StatusColor.SUCCESS)
                     self._update_runner_state(action)
-                except PerformLateError as e:
-                    self._set_result(StatusColor.WARNING)
-                    if e.actual_frame > e.scheduled_frame + 30:  # ~1 second late
-                        raise ErrorToLog(f"当前操作晚了超过一周期。疑似发生错误。请求人工接管。")
                 except UserPausedError:
                     logger.info("Paused/stopped during action execution, stopping runner.")
                     break

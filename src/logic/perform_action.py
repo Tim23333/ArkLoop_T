@@ -295,11 +295,9 @@ def perform_action(action: Action, user_paused: Callable[[], bool]) -> None:
     if actual_frame == target_frame:
         logger.info(f"Performed action: {action}")
     elif actual_frame > target_frame:
-        logger.warning(f"Performed action: {action} (not on time)")
-        raise PerformLateError(get_game_time(), target_frame)
+        logger.warning(f"Performed action: {action} (not on time, frame {actual_frame} vs target {target_frame})")
     else:
-        logger.error(f"Performed action: {action} (unexpected time)")
-        raise PerformLateError(get_game_time(), target_frame)
+        logger.warning(f"Performed action: {action} (unexpected time, frame {actual_frame} vs target {target_frame})")
 
 
 if __name__ == "__main__":
