@@ -30,7 +30,7 @@ class ActionRecorder:
     """
     Aggregate raw mouse events into high-level actions and export them to a
     JSON file aligned with the shared timestamp origin used by
-    ``VideoRecorder``).
+    the live recorder).
 
     Step 4 aggregation is intentionally lightweight: clicks, drags and
     scrolls are detected, but mapping to ``deploy`` / ``skill`` /

@@ -44,22 +44,19 @@ if _sys.platform == "win32":
             except Exception:
                 pass
 
-import base64
 import json
-import mimetypes
 import os
 import signal
 import sys
 import threading
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import webview
 
 if getattr(sys, "frozen", False):
-    # PyInstaller onedir: bundled datas (ui/dist, resource, calibration,
-    # Tesseract-OCR, ...) live under sys._MEIPASS (== _internal/).  User-
+    # PyInstaller onedir: bundled datas (ui/dist, resource,
+    # bundled resources live under sys._MEIPASS (== _internal/).  User-
     # writable state (timelines/, config.json) lives next to the EXE so it
     # survives reinstalls and isn't hidden inside _internal.
     project_root = Path(sys._MEIPASS)
@@ -72,7 +69,10 @@ sys.path.insert(0, str(project_root))
 
 from recorder.backend import ActionBackend, write_axis_json
 from recorder.action_recognizer import AvatarMatcher
-from src.cache import OPERATOR_MAPPING
+from src.desktop.config_service import ConfigService
+from src.desktop.resource_service import ResourceService
+from src.desktop.state_publisher import start_state_publisher
+from src.desktop.timeline_service import TimelineService
 from src.logger import logger
 from src.logic.ws_time_source import DEFAULT_WS_URL, get_ws_time_source
 
@@ -90,7 +90,9 @@ class ArkLoopApi:
         self.window = window
         self.backend: Optional[ActionBackend] = None
         self._lock = threading.Lock()
-        self._avatar_cache: Dict[str, str] = {}
+        self.config_service = ConfigService(user_root)
+        self.resource_service = ResourceService(project_root)
+        self.timeline_service = TimelineService(timelines_dir, window)
         # Pre-warmed resources (populated in init_app)
         self._cached_matcher: Optional[AvatarMatcher] = None
         self._cached_view_detector: Optional[Any] = None
@@ -101,7 +103,7 @@ class ArkLoopApi:
         self._last_playback_state: Dict[str, Any] = {}
         self._mouse_debug = mouse_debug
         # True when the most recent playback breakpoint left the game paused
-        # via the in-game cost-bar toggle. Cleared on the next start_recording
+        # via the in-game pause toggle. Cleared on the next start_recording
         # / start_playback so the game is resumed before fresh control starts.
         self._game_paused_by_runner = False
 
@@ -112,7 +114,6 @@ class ArkLoopApi:
         self,
         map_code: str = "1-7",
         max_tick: Optional[int] = None,
-        calibration_path: Optional[str] = None,
         fake_avatar: bool = False,
         frame_offset: int = 0,
         recognizer_state: Optional[Dict[str, Any]] = None,
@@ -138,7 +139,6 @@ class ArkLoopApi:
             self.backend = ActionBackend(
                 map_code=map_code,
                 max_tick=max_tick,
-                calibration_path=Path(calibration_path) if calibration_path else None,
                 event_callback=self._on_backend_event,
                 fake_avatar=fake_avatar,
                 frame_offset=int(frame_offset or 0),
@@ -213,172 +213,11 @@ class ArkLoopApi:
                 logger.exception(f"Failed to save axis: {exc}")
                 return False
 
-    def list_calibrations(self) -> List[str]:
-        calibration_dir = project_root / "calibration"
-        if not calibration_dir.is_dir():
-            return []
-        return [
-            str(p.relative_to(project_root))
-            for p in calibration_dir.glob("*.json")
-        ]
-
-    def get_calibration_info(self, path: str) -> Dict[str, Any]:
-        """Return metadata from a calibration JSON file.
-
-        Reads the calibration file relative to the project root and returns
-        the total frame count along with screen dimensions. Returns zeros on
-        error so the frontend can fall back to a default tick count.
-        """
-        try:
-            target = (project_root / path.strip().replace("\\", "/")).resolve()
-            if target.parent.resolve() != (project_root / "calibration").resolve():
-                logger.warning(f"Rejected calibration outside calibration dir: {path}")
-                return {"total_frames": 0, "screen_width": 0, "screen_height": 0}
-            with open(target, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            profiles = data.get("profiles", [])
-            total = 0
-            if profiles and isinstance(profiles, list):
-                total = profiles[0].get("total_frames", 0) or 0
-            return {
-                "total_frames": int(total),
-                "screen_width": int(data.get("screen_width", 0) or 0),
-                "screen_height": int(data.get("screen_height", 0) or 0),
-            }
-        except Exception as exc:
-            logger.exception(f"Failed to read calibration info for {path}: {exc}")
-            return {"total_frames": 0, "screen_width": 0, "screen_height": 0}
-
     def capture_with_grid(self, map_code: str) -> str:
-        """Capture a MuMu screenshot and overlay chess-style tile labels.
-
-        Each tile center in the **front view** is annotated in red with its
-        chess label (e.g. ``A6``). The returned value is a PNG data URI ready
-        to drop into an ``<img src>``. Empty string on failure.
-        """
-        try:
-            import io
-            import cv2
-            from PIL import Image, ImageDraw, ImageFont
-
-            from src.cache import get_map_by_code
-            from src.logic.calc_view import transform_map_to_view
-            from src.mumu.mumu_vision import capture_game_window
-
-            map_data = get_map_by_code(str(map_code or "").strip())
-            if not map_data:
-                logger.warning(f"capture_with_grid: unknown map_code {map_code!r}")
-                return ""
-
-            frame_bgr = capture_game_window(ratio=None, color=True)
-            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            pil_img = Image.fromarray(frame_rgb)
-            draw = ImageDraw.Draw(pil_img)
-
-            height = int(map_data.get("height", 0) or 0)
-            width = int(map_data.get("width", 0) or 0)
-            if height <= 0 or width <= 0:
-                logger.warning(
-                    f"capture_with_grid: map {map_code} has invalid size "
-                    f"({width}x{height})"
-                )
-                buf = io.BytesIO()
-                pil_img.save(buf, format="PNG")
-                return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode('ascii')}"
-
-            view_positions = transform_map_to_view(map_data, side=False)
-
-            # Bold red text large enough to be legible against busy screenshots.
-            font = None
-            for candidate in (
-                "C:/Windows/Fonts/arialbd.ttf",
-                "C:/Windows/Fonts/arial.ttf",
-                "C:/Windows/Fonts/segoeuib.ttf",
-            ):
-                try:
-                    font = ImageFont.truetype(candidate, 18)
-                    break
-                except Exception:
-                    continue
-
-            img_w, img_h = pil_img.size
-            for row in range(height):
-                for col in range(width):
-                    vx, vy = view_positions[row][col]
-                    cx = int(vx * img_w)
-                    cy = int(vy * img_h)
-                    letter = chr(ord("A") + (height - 1 - row))
-                    number = col + 1
-                    label = f"{letter}{number}"
-                    # Measure for centering — fall back to a constant offset
-                    # if the font wasn't loaded.
-                    if font is not None:
-                        try:
-                            bbox = draw.textbbox((0, 0), label, font=font)
-                            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-                        except Exception:
-                            tw, th = (len(label) * 10, 16)
-                    else:
-                        tw, th = (len(label) * 8, 12)
-                    tx = cx - tw // 2
-                    ty = cy - th // 2
-                    # Black outline for readability over any background.
-                    for dx in (-1, 0, 1):
-                        for dy in (-1, 0, 1):
-                            if dx == 0 and dy == 0:
-                                continue
-                            draw.text((tx + dx, ty + dy), label, fill=(0, 0, 0), font=font)
-                    draw.text((tx, ty), label, fill=(255, 40, 40), font=font)
-
-            buf = io.BytesIO()
-            pil_img.save(buf, format="PNG")
-            return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode('ascii')}"
-        except Exception as exc:
-            logger.exception(f"capture_with_grid failed: {exc}")
-            return ""
+        return self.resource_service.capture_with_grid(map_code)
 
     def get_avatar_url(self, oper: str) -> str:
-        """Return a data URI for an operator avatar, or empty string."""
-        if not oper:
-            return ""
-        if oper in self._avatar_cache:
-            return self._avatar_cache[oper]
-
-        base = OPERATOR_MAPPING.get(oper, oper)
-        avatar_dir = project_root / "resource" / "avatar"
-        # Prefer exact/base match, then any skin variant.
-        candidates = [
-            avatar_dir / f"{base}.png",
-            avatar_dir / f"{base}_1.png",
-            avatar_dir / f"{base}_1+.png",
-            avatar_dir / f"{oper}.png",
-        ]
-        for candidate in candidates:
-            if candidate.is_file():
-                url = self._file_to_data_uri(candidate)
-                self._avatar_cache[oper] = url
-                return url
-        # Fallback to any file starting with the resolved base name.
-        if avatar_dir.is_dir():
-            for path in sorted(avatar_dir.glob(f"{base}*.png")):
-                url = self._file_to_data_uri(path)
-                self._avatar_cache[oper] = url
-                return url
-            for path in sorted(avatar_dir.glob(f"{oper}*.png")):
-                url = self._file_to_data_uri(path)
-                self._avatar_cache[oper] = url
-                return url
-        self._avatar_cache[oper] = ""
-        return ""
-
-    @staticmethod
-    def _file_to_data_uri(path: Path) -> str:
-        """Read a local file and return a base64 data URI."""
-        mime, _ = mimetypes.guess_type(str(path))
-        mime = mime or "application/octet-stream"
-        with open(path, "rb") as f:
-            data = base64.b64encode(f.read()).decode("ascii")
-        return f"data:{mime};base64,{data}"
+        return self.resource_service.get_avatar_url(oper)
 
     def init_app(self) -> dict:
         """Initialize app resources (avatar cache, MAA, directories). Called once on startup."""
@@ -387,8 +226,8 @@ class ArkLoopApi:
 
             # Start the WebSocket time source using the URL configured in
             # config.json (time_source.ws_url).  This is the sole game-time
-            # provider for both recording and playback; cost-bar detection is
-            # retired.  Started here so the feed is live before any record /
+            # provider for both recording and playback.  Started here so the
+            # feed is live before any record /
             # playback session, and the UI can show connection status.
             try:
                 cfg_path = user_root / "config.json"
@@ -405,13 +244,7 @@ class ArkLoopApi:
             except Exception as exc:
                 logger.warning(f"Failed to start WS time source: {exc}")
 
-            # Pre-warm avatar data URIs
-            avatar_dir = project_root / "resource" / "avatar"
-            count = 0
-            if avatar_dir.is_dir():
-                for p in sorted(avatar_dir.glob("*.png"))[:30]:
-                    self._file_to_data_uri(p)
-                    count += 1
+            count = self.resource_service.prewarm_avatars(limit=30)
 
             # Pre-warm avatar matcher.  Constructing it only sets
             # ``_templates = None``; the actual cv2.imread of every operator
@@ -462,373 +295,61 @@ class ArkLoopApi:
             return {"ok": False, "error": str(exc)}
 
     def create_timeline(self) -> str:
-        """Create an empty timeline file with a timestamp name. Returns the file name."""
-        from datetime import datetime
-        name = f"timeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        try:
-            timelines_dir.mkdir(parents=True, exist_ok=True)
-            path = timelines_dir / name
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump({"settings": {}, "actions": []}, f, ensure_ascii=False, indent=2)
-        except Exception as exc:
-            logger.exception(f"Failed to create timeline: {exc}")
-        return name
+        return self.timeline_service.create_timeline()
 
     def save_timeline(self, name: str, actions: list, settings: dict) -> bool:
-        """Save (or overwrite) a timeline in the timelines/ folder."""
-        try:
-            timelines_dir.mkdir(parents=True, exist_ok=True)
-            safe = name.strip().replace("/", "_").replace("\\", "_")
-            if not safe.endswith(".json"):
-                safe += ".json"
-            path = timelines_dir / safe
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump({"settings": settings, "actions": actions}, f, ensure_ascii=False, indent=2)
-            return True
-        except Exception as exc:
-            logger.exception(f"Failed to save timeline {name}: {exc}")
-            return False
+        return self.timeline_service.save_timeline(name, actions, settings)
 
     def delete_timeline(self, name: str) -> bool:
-        """Delete a timeline file."""
-        try:
-            path = (timelines_dir / name.strip()).resolve()
-            if path.parent.resolve() != timelines_dir.resolve():
-                logger.warning(f"Rejected delete outside timelines dir: {name}")
-                return False
-            if path.is_file():
-                path.unlink()
-                return True
-        except Exception as exc:
-            logger.exception(f"Failed to delete timeline {name}: {exc}")
-        return False
+        return self.timeline_service.delete_timeline(name)
 
     def duplicate_timeline(self, name: str) -> str:
-        """Copy an existing timeline file to ``<stem>(N).json``.
-
-        ``N`` starts at 1 and increments until the candidate file name is
-        free. Returns the created file's name, or '' on failure.
-        """
-        try:
-            src_path = (timelines_dir / name.strip()).resolve()
-            if src_path.parent.resolve() != timelines_dir.resolve() or not src_path.is_file():
-                return ""
-            stem = src_path.stem
-            # Strip any existing "(N)" suffix so duplicates of duplicates
-            # don't snowball into "name(1)(1)(1)".
-            import re
-            base = re.sub(r"\((\d+)\)$", "", stem).rstrip()
-            n = 1
-            while True:
-                candidate = timelines_dir / f"{base}({n}).json"
-                if not candidate.exists():
-                    break
-                n += 1
-            # Read+write rather than file copy so we preserve the JSON shape
-            # (and pick up any normalization the loader would apply).
-            with open(src_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            with open(candidate, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            return candidate.name
-        except Exception as exc:
-            logger.exception(f"Failed to duplicate timeline {name}: {exc}")
-            return ""
+        return self.timeline_service.duplicate_timeline(name)
 
     def rename_timeline(self, old_name: str, new_name: str) -> str:
-        """Rename a timeline file; returns the actual new file name."""
-        try:
-            old_path = (timelines_dir / old_name.strip()).resolve()
-            if old_path.parent.resolve() != timelines_dir.resolve():
-                return old_name
-            safe = new_name.strip().replace("/", "_").replace("\\", "_")
-            if not safe.endswith(".json"):
-                safe += ".json"
-            new_path = timelines_dir / safe
-            # Avoid collision
-            stem, counter = new_path.stem, 1
-            while new_path.exists() and new_path.resolve() != old_path:
-                new_path = timelines_dir / f"{stem}_{counter}.json"
-                counter += 1
-            if old_path.is_file():
-                old_path.rename(new_path)
-            return new_path.name
-        except Exception as exc:
-            logger.exception(f"Failed to rename timeline: {exc}")
-            return old_name
+        return self.timeline_service.rename_timeline(old_name, new_name)
 
     def export_timeline(self, name: str) -> bool:
-        """Open a native save dialog and write the timeline JSON to the chosen path.
-
-        Returns True on success, False on cancel or error.
-        """
-        try:
-            src = (timelines_dir / name.strip()).resolve()
-            if src.parent.resolve() != timelines_dir.resolve() or not src.is_file():
-                return False
-            import webview as _wv
-            result = self.window.create_file_dialog(
-                _wv.SAVE_DIALOG,
-                save_filename=name,
-                file_types=('JSON files (*.json)',),
-            )
-            if not result:
-                return False
-            target = result if isinstance(result, str) else result[0]
-            with open(src, "r", encoding="utf-8") as f:
-                data = f.read()
-            Path(target).parent.mkdir(parents=True, exist_ok=True)
-            with open(target, "w", encoding="utf-8", newline="\n") as f:
-                f.write(data)
-            logger.info(f"Exported timeline {name} to {target}")
-            return True
-        except Exception as exc:
-            logger.exception(f"export_timeline failed: {exc}")
-            return False
+        return self.timeline_service.export_timeline(name)
 
     def import_timeline(self) -> str:
-        """Open a native open dialog, read a JSON timeline, and copy it into timelines/.
-
-        Returns the imported timeline filename (e.g. ``"my_timeline.json"``),
-        or ``""`` on cancel / invalid file / error.
-        """
-        try:
-            import webview as _wv
-            result = self.window.create_file_dialog(
-                _wv.OPEN_DIALOG,
-                file_types=('JSON files (*.json)',),
-            )
-            if not result:
-                return ""
-            src = result if isinstance(result, str) else result[0]
-            with open(src, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if not isinstance(data, dict) or "actions" not in data:
-                logger.warning(f"import_timeline: not a valid timeline JSON: {src}")
-                return ""
-            # Use the source filename; handle collisions with (N) suffix.
-            name = os.path.basename(src)
-            if not name.endswith(".json"):
-                name += ".json"
-            timelines_dir.mkdir(parents=True, exist_ok=True)
-            target = timelines_dir / name
-            stem, ext = os.path.splitext(name)
-            counter = 1
-            while target.exists():
-                target = timelines_dir / f"{stem}({counter}){ext}"
-                counter += 1
-            with open(target, "w", encoding="utf-8", newline="\n") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            logger.info(f"Imported timeline from {src} as {target.name}")
-            return target.name
-        except Exception as exc:
-            logger.exception(f"import_timeline failed: {exc}")
-            return ""
+        return self.timeline_service.import_timeline()
 
     def get_app_config(self) -> Dict[str, Any]:
-        """Return the contents of ``config.json`` (MuMu install path etc.).
-
-        Returns ``{}`` on read failure so the UI can still render its form.
-        """
-        try:
-            cfg_path = user_root / "config.json"
-            if cfg_path.is_file():
-                with open(cfg_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-        except Exception as exc:
-            logger.warning(f"Failed to read config.json: {exc}")
-        return {}
+        return self.config_service.get_app_config()
 
     def get_ws_status(self) -> Dict[str, Any]:
-        """Return the WebSocket time source connection status + latest reading."""
-        try:
-            return get_ws_time_source().status()
-        except Exception as exc:
-            logger.warning(f"get_ws_status failed: {exc}")
-            return {"connected": False, "url": DEFAULT_WS_URL}
+        return self.config_service.get_ws_status()
 
     def restart_ws_source(self, url: Optional[str] = None) -> bool:
-        """(Re)start the WS time source with a new URL.
-
-        Called after the user edits the WS URL in Settings.  Persists the URL
-        to config.json so it survives restarts, then reconnects immediately.
-        """
-        try:
-            if url:
-                clean = url.strip()
-                if clean:
-                    # Persist to config.json so init_app picks it up next launch.
-                    self.update_app_config({"time_source": {"ws_url": clean}})
-                    get_ws_time_source().start(url=clean)
-                    logger.info(f"WS time source restarted (url={clean})")
-                    return True
-            # No URL: just restart with whatever is in config / default.
-            get_ws_time_source().start()
-            return True
-        except Exception as exc:
-            logger.exception(f"restart_ws_source failed: {exc}")
-            return False
+        return self.config_service.restart_ws_source(url)
 
     def update_app_config(self, patch: Dict[str, Any]) -> bool:
-        """Deep-merge ``patch`` into ``config.json`` and persist.
-
-        Settings only apply to NEW captures: the MuMu DLL handle is cached
-        the first time ``capture_game_window`` runs, so a path change here
-        needs an app restart to take effect. The UI is expected to warn.
-        """
-        try:
-            cfg_path = user_root / "config.json"
-            current: Dict[str, Any] = {}
-            if cfg_path.is_file():
-                with open(cfg_path, "r", encoding="utf-8") as f:
-                    current = json.load(f)
-
-            def _merge(dst: Dict[str, Any], src: Dict[str, Any]) -> None:
-                for k, v in src.items():
-                    if isinstance(v, dict) and isinstance(dst.get(k), dict):
-                        _merge(dst[k], v)
-                    else:
-                        dst[k] = v
-
-            _merge(current, patch or {})
-            with open(cfg_path, "w", encoding="utf-8") as f:
-                json.dump(current, f, ensure_ascii=False, indent=2)
-            return True
-        except Exception as exc:
-            logger.exception(f"Failed to update config.json: {exc}")
-            return False
+        return self.config_service.update_app_config(patch)
 
     def list_timeline_presets(self) -> List[Dict[str, Any]]:
-        """Return saved new-timeline presets in insertion order."""
-        try:
-            meta = timelines_dir / ".meta.json"
-            if meta.is_file():
-                with open(meta, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                raw = data.get("presets", []) or []
-                # Normalize so the frontend always sees {name, settings}.
-                result: List[Dict[str, Any]] = []
-                for entry in raw:
-                    if isinstance(entry, dict) and "name" in entry:
-                        result.append({
-                            "name": str(entry["name"]),
-                            "settings": entry.get("settings", {}) or {},
-                        })
-                return result
-        except Exception as exc:
-            logger.warning(f"Failed to read presets: {exc}")
-        return []
+        return self.timeline_service.list_timeline_presets()
 
     def save_timeline_preset(self, name: str, settings: Dict[str, Any]) -> bool:
-        """Insert or replace a preset by name. Persists to .meta.json."""
-        clean = (name or "").strip()
-        if not clean:
-            return False
-        try:
-            timelines_dir.mkdir(parents=True, exist_ok=True)
-            meta = timelines_dir / ".meta.json"
-            data: Dict[str, Any] = {}
-            if meta.is_file():
-                with open(meta, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            presets = data.get("presets", []) or []
-            presets = [p for p in presets if not (isinstance(p, dict) and p.get("name") == clean)]
-            presets.append({"name": clean, "settings": settings or {}})
-            data["presets"] = presets
-            with open(meta, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            return True
-        except Exception as exc:
-            logger.exception(f"Failed to save preset {name}: {exc}")
-            return False
+        return self.timeline_service.save_timeline_preset(name, settings)
 
     def delete_timeline_preset(self, name: str) -> bool:
-        """Remove a preset by name."""
-        clean = (name or "").strip()
-        if not clean:
-            return False
-        try:
-            meta = timelines_dir / ".meta.json"
-            if not meta.is_file():
-                return False
-            with open(meta, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            presets = data.get("presets", []) or []
-            before = len(presets)
-            presets = [p for p in presets if not (isinstance(p, dict) and p.get("name") == clean)]
-            if len(presets) == before:
-                return False
-            data["presets"] = presets
-            with open(meta, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            return True
-        except Exception as exc:
-            logger.exception(f"Failed to delete preset {name}: {exc}")
-            return False
+        return self.timeline_service.delete_timeline_preset(name)
 
     def get_pinned_timelines(self) -> list:
-        """Return list of pinned timeline names."""
-        try:
-            meta = timelines_dir / ".meta.json"
-            if meta.is_file():
-                with open(meta, "r", encoding="utf-8") as f:
-                    return json.load(f).get("pinned", [])
-        except Exception:
-            pass
-        return []
+        return self.timeline_service.get_pinned_timelines()
 
     def set_pinned_timelines(self, pinned: list) -> bool:
-        """Persist the pinned timelines list."""
-        try:
-            timelines_dir.mkdir(parents=True, exist_ok=True)
-            meta = timelines_dir / ".meta.json"
-            data: dict = {}
-            if meta.is_file():
-                with open(meta, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            data["pinned"] = pinned
-            with open(meta, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            return True
-        except Exception as exc:
-            logger.exception(f"Failed to save pinned: {exc}")
-            return False
+        return self.timeline_service.set_pinned_timelines(pinned)
 
     def list_timelines(self) -> List[str]:
-        """Return timeline JSON file names, newest first."""
-        if not timelines_dir.is_dir():
-            return []
-        files = [p for p in timelines_dir.glob("*.json") if not p.name.startswith(".")]
-        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        return [p.name for p in files]
+        return self.timeline_service.list_timelines()
 
     def list_maps(self) -> List[Dict[str, str]]:
-        """Return [{code, name}] for all known maps."""
-        resource_dir = project_root / "resource"
-        code_file = resource_dir / "level_code_mapping.json"
-        name_file = resource_dir / "level_name_mapping.json"
-        code_map: Dict[str, str] = {}
-        name_map: Dict[str, str] = {}
-        try:
-            with open(code_file, encoding="utf-8") as f:
-                code_map = json.load(f)  # {code: filename}
-        except Exception:
-            pass
-        try:
-            with open(name_file, encoding="utf-8") as f:
-                name_map = json.load(f)  # {name: filename}
-        except Exception:
-            pass
-        # Build reverse: filename -> name
-        filename_to_name: Dict[str, str] = {v: k for k, v in name_map.items()}
-        result: List[Dict[str, str]] = []
-        for code, filename in code_map.items():
-            result.append({"code": code, "name": filename_to_name.get(filename, "")})
-        return result
+        return self.resource_service.list_maps()
 
     def list_operators(self) -> List[Dict[str, str]]:
-        """Return all operators as [{id, name}] for the search dialog."""
-        return [{"id": k, "name": k} for k in OPERATOR_MAPPING.keys()]
+        return self.resource_service.list_operators()
 
     def start_playback(
         self,
@@ -836,7 +357,6 @@ class ArkLoopApi:
         autoenter: bool = False,
         frame_offset: int = 0,
         breakpoints: Optional[List[int]] = None,
-        calibration_path: Optional[str] = None,
     ) -> bool:
         """Start playing a timeline file in a background thread.
 
@@ -855,9 +375,6 @@ class ArkLoopApi:
         except Exception as exc:
             logger.exception(f"Failed to parse axis for playback: {exc}")
             return False
-
-        if calibration_path:
-            _settings = {**_settings, "calibration_path": calibration_path}
 
         bp_frames: List[int] = []
         for bp in breakpoints or []:
@@ -984,67 +501,15 @@ class ArkLoopApi:
             },
         )
         return {"ok": True}
-
     def append_to_timeline(self, name: str, new_actions: list) -> bool:
-        """Append actions to an existing timeline file (used after resume-record).
-
-        Assumes ``new_actions`` already carry the correct (offset-biased) frame
-        values — the recorder backend handles that when started with
-        ``frame_offset > 0``.
-        """
-        try:
-            path = (timelines_dir / name.strip()).resolve()
-            if path.parent.resolve() != timelines_dir.resolve() or not path.is_file():
-                return False
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            existing = data.get("actions", [])
-            existing.extend(new_actions or [])
-            data["actions"] = existing
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            return True
-        except Exception as exc:
-            logger.exception(f"Failed to append to timeline {name}: {exc}")
-            return False
+        return self.timeline_service.append_to_timeline(name, new_actions)
 
     def save_breakpoints(self, name: str, breakpoints: list) -> bool:
-        """Persist breakpoints into a timeline's settings."""
-        try:
-            path = (timelines_dir / name.strip()).resolve()
-            if path.parent.resolve() != timelines_dir.resolve() or not path.is_file():
-                return False
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            settings = data.get("settings", {}) or {}
-            settings["breakpoints"] = breakpoints or []
-            data["settings"] = settings
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            return True
-        except Exception as exc:
-            logger.exception(f"Failed to save breakpoints for {name}: {exc}")
-            return False
+        return self.timeline_service.save_breakpoints(name, breakpoints)
 
     def load_timeline(self, name: str) -> Dict[str, Any]:
-        """Load a timeline JSON from the timelines folder."""
-        path = timelines_dir / name
-        if not path.is_file():
-            return {"settings": {}, "actions": []}
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            actions = data.get("actions", [])
-            for action in actions:
-                if "cycle" not in action:
-                    action["cycle"] = 0
-            return {
-                "settings": data.get("settings", {}),
-                "actions": actions,
-            }
-        except Exception as exc:
-            logger.warning(f"Failed to load timeline {name}: {exc}")
-            return {"settings": {}, "actions": []}
+        return self.timeline_service.load_timeline(name)
+
 
     def get_window_bounds(self) -> Dict[str, int]:
         """Return current window geometry."""
@@ -1181,7 +646,7 @@ def main() -> None:
 
     # OS-native title-bar X bypasses any frontend JS — wire the pywebview
     # closing event to ``_shutdown()`` so the backend (pynput mouse listener,
-    # AnalysisWorker, FrameSource) actually gets stopped.  Without this, a
+    # FrameSource and input hooks actually get stopped.  Without this, a
     # post-recording exit leaves pynput's non-daemon Listener thread holding
     # the interpreter alive even after the window has disappeared.
     try:
@@ -1192,68 +657,11 @@ def main() -> None:
     # Allow Ctrl+C to exit cleanly
     signal.signal(signal.SIGINT, lambda _s, _f: api.close_window())
 
-    # Periodically push game_time + state to the frontend.
-    #
-    # Architecture: the WS recv thread (on_message) ONLY updates a shared
-    # cache — it never calls evaluate_js.  This thread polls the cache at
-    # 60 Hz and pushes to the frontend.  recv and display are fully decoupled
-    # so the 125 Hz WS feed never backs up.
-    def _state_publisher() -> None:
-        last_axis_len: int = 0
-        last_ws_status: Optional[Dict[str, Any]] = None
-        slow_counter = 0
-        while True:
-            time.sleep(0.016)  # 16 ms, ~60 Hz
-            try:
-                # Fast lane: game_time from WS cache (reads ints under lock, <0.1ms).
-                # Always use the latest frame_count — do NOT gate on mem_ok.
-                # mem_ok only affects the "connected" display flag; the playhead
-                # must track frame_count regardless, otherwise the timeline
-                # freezes whenever the server reports connected=false.
-                try:
-                    ws = get_ws_time_source()
-                    fc, game_time, mem_ok = ws.latest()
-                    connected = ws.is_fresh()
-                    fc_int = int(fc)
-                    if fc_int >= 0:
-                        api._push_event("game_time", {
-                            "frame_count": fc_int,
-                            "game_time": float(game_time),
-                            "connected": connected,
-                            "mem_ok": bool(mem_ok),
-                        })
-                except Exception:
-                    pass
-
-                # Surface WS connection status changes (for the settings UI).
-                try:
-                    status = get_ws_time_source().status()
-                    ws_view = {
-                        "connected": status.get("connected"),
-                        "mem_ok": status.get("mem_ok"),
-                        "url": status.get("url"),
-                    }
-                    if ws_view != last_ws_status:
-                        api._push_event("ws_status", status)
-                        last_ws_status = ws_view
-                except Exception:
-                    pass
-
-                # Slow lane: full state + axis only while recording.
-                if api.backend is None:
-                    continue
-                slow_counter += 1
-                if slow_counter >= 3:
-                    slow_counter = 0
-                    api._push_state()
-                    axis = api.backend.get_axis()
-                    if len(axis) != last_axis_len:
-                        api._push_event("axis", axis)
-                        last_axis_len = len(axis)
-            except Exception:
-                pass
-
-    threading.Thread(target=_state_publisher, daemon=True).start()
+    start_state_publisher(
+        get_backend=lambda: api.backend,
+        push_event=api._push_event,
+        push_state=api._push_state,
+    )
 
     # ``private_mode=True`` is always on: WebView2 caches ``index.html`` by
     # file:// path, and since the path is stable across rebuilds, any new

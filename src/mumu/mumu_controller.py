@@ -67,7 +67,7 @@ def mouseup(pos: Tuple[float, float]) -> None:
     """
     Simulate a mouse up event at the given coordinates or ratio of window size.
     """
-    win32api.SendMessage(get_handle(), win32con.WM_LBUTTONUP, win32con.MK_LBUTTON, win32api.MAKELONG(*pos))
+    win32api.SendMessage(get_handle(), win32con.WM_LBUTTONUP, 0, win32api.MAKELONG(*pos))
 
 @handle_coordinates
 def mousemove(pos: Tuple[float, float]) -> None:

@@ -56,7 +56,7 @@ class DebugConfig:
     # Per-feature logging. Most default to False to avoid noisy output in
     # scripts that run with global DEBUG level.
     LOG_RESOURCE_LOAD: bool = False       # avatar / map / metadata load info
-    LOG_TICK_DETECTION: bool = False      # cost-bar calibration / tick detection
+    LOG_TICK_DETECTION: bool = False      # reserved legacy debug flag
 
     # Keyframe / artifact saving.
     SAVE_ACTION_KEYFRAMES: bool = False
@@ -113,6 +113,11 @@ class PerformActionConfig:
     MINIMUM_WAITTIME = 0.02
     FRAME_WAITTIME = 0.1
     GENERAL_WAITTIME = 0.3
+    DRAG_HOLD_TIME = 0.12
+    DRAG_STEP_WAIT = 0.04
+    DRAG_STEPS = 8
+    DEPLOY_PREPARE_FRAMES = 60
+    DEPLOY_DIRECTION_FRAMES = 30
 
 
 class LocateAvatarFallbackConfig:

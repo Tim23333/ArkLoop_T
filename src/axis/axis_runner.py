@@ -30,8 +30,7 @@ class AxisRunner:
     """
     Runs a list of Actions against the game.
 
-    All timing uses the WS ``frame_count`` directly — no cycle/tick
-    decomposition or cost-bar calibration.
+    All timing uses the WS ``frame_count`` directly. The old cycle/tick fields are accepted only when loading legacy JSON.
     """
 
     def __init__(

@@ -7,25 +7,16 @@ export interface MapInfo {
   name: string
 }
 
-export interface CalibrationInfo {
-  total_frames: number
-  screen_width: number
-  screen_height: number
-}
-
 export interface NewTimelineResult {
   mapCode: string
   mapName: string
-  calibration: string
   maxTick: number
   devices: MapDevice[]
 }
 
 interface NewTimelineDialogProps {
   maps: MapInfo[]
-  calibrations: string[]
   presets?: TimelinePreset[]
-  getCalibrationInfo?: (path: string) => Promise<CalibrationInfo>
   onConfirm: (result: NewTimelineResult) => void
   onDismiss: () => void
   onSavePreset?: (name: string, settings: TimelineSettings) => Promise<boolean> | void
@@ -34,9 +25,7 @@ interface NewTimelineDialogProps {
 
 export function NewTimelineDialog({
   maps,
-  calibrations,
   presets = [],
-  getCalibrationInfo,
   onConfirm,
   onDismiss,
   onSavePreset,
@@ -45,49 +34,17 @@ export function NewTimelineDialog({
   const [query, setQuery] = useState('')
   const [selectedMap, setSelectedMap] = useState<MapInfo | null>(null)
   const [showDropdown, setShowDropdown] = useState(false)
-  const [selectedCalib, setSelectedCalib] = useState(calibrations[0] ?? '')
   const [maxTick, setMaxTick] = useState(30)
-  const [isLoadingCalib, setIsLoadingCalib] = useState(false)
   const [devices, setDevices] = useState<MapDevice[]>([])
   const [selectedPreset, setSelectedPreset] = useState<string>('')
   const [showSavePresetPrompt, setShowSavePresetPrompt] = useState(false)
   const [showDeletePresetConfirm, setShowDeletePresetConfirm] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const dropdownRef = useRef<HTMLDivElement>(null)
-  // Set true right after applying a preset so the calibration auto-fill effect
-  // doesn't clobber the preset's max_tick. Cleared after the effect runs once.
-  const skipNextMaxTickAutoFill = useRef(false)
 
   useEffect(() => {
     inputRef.current?.focus()
   }, [])
-
-  useEffect(() => {
-    if (!selectedCalib || !getCalibrationInfo) {
-      return
-    }
-    let cancelled = false
-    setIsLoadingCalib(true)
-    getCalibrationInfo(selectedCalib)
-      .then((info) => {
-        if (cancelled) return
-        if (skipNextMaxTickAutoFill.current) {
-          skipNextMaxTickAutoFill.current = false
-          return
-        }
-        setMaxTick(info.total_frames > 0 ? info.total_frames : 30)
-      })
-      .catch((err) => {
-        if (cancelled) return
-        console.error('Failed to load calibration info:', err)
-      })
-      .finally(() => {
-        if (!cancelled) setIsLoadingCalib(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [selectedCalib, getCalibrationInfo])
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -106,7 +63,6 @@ export function NewTimelineDialog({
   const buildCurrentSettings = (): TimelineSettings => ({
     map_code: selectedMap?.code ?? query.trim() ?? undefined,
     map_name: selectedMap?.name || undefined,
-    calibration_path: selectedCalib || undefined,
     max_tick: maxTick,
     devices: devices.length > 0 ? devices : undefined,
   })
@@ -126,13 +82,6 @@ export function NewTimelineDialog({
         setSelectedMap(null)
         setQuery(s.map_code)
       }
-    }
-    if (s.calibration_path && s.calibration_path !== selectedCalib) {
-      // Prevent the calibration-changed effect from overwriting preset max_tick.
-      if (typeof s.max_tick === 'number' && s.max_tick > 0) {
-        skipNextMaxTickAutoFill.current = true
-      }
-      setSelectedCalib(s.calibration_path)
     }
     if (typeof s.max_tick === 'number' && s.max_tick > 0) setMaxTick(s.max_tick)
     setDevices(Array.isArray(s.devices) ? s.devices.map((d) => ({ ...d })) : [])
@@ -160,7 +109,6 @@ export function NewTimelineDialog({
     onConfirm({
       mapCode: code,
       mapName: name,
-      calibration: selectedCalib,
       maxTick,
       devices: devices.map((d, i) => ({
         name: (d.name || `装置${i + 1}`).trim(),
@@ -272,31 +220,19 @@ export function NewTimelineDialog({
           )}
         </div>
 
-        {/* Calibration */}
+        {/* Timing compatibility */}
         <div className="flex flex-col gap-1.5">
-          <label className="text-xs text-text-dim">校准文件</label>
-          {calibrations.length === 0 ? (
-            <div className="text-xs text-text-dim italic">无可用校准文件</div>
-          ) : (
-            <select
-              value={selectedCalib}
-              onChange={(e) => setSelectedCalib(e.target.value)}
-              className="w-full bg-[#0B0F13] border border-border-panel rounded px-3 py-1.5 text-sm text-text-primary outline-none focus:border-accent-blue/60"
-            >
-              {calibrations.map((c) => (
-                <option key={c} value={c}>{c}</option>
-              ))}
-            </select>
-          )}
-          <div className="text-xs text-text-muted">
-            {isLoadingCalib ? (
-              '读取校准信息中…'
-            ) : (
-              <>
-                max_tick（兼容旧格式）：<span className="text-text-primary font-mono">{maxTick}</span>
-              </>
-            )}
-          </div>
+          <label className="text-xs text-text-dim">max_tick (legacy timeline compatibility)</label>
+          <input
+            type="number"
+            min={1}
+            value={maxTick}
+            onChange={(e) => {
+              const v = parseInt(e.target.value, 10)
+              setMaxTick(Number.isFinite(v) && v > 0 ? v : 30)
+            }}
+            className="w-full bg-[#0B0F13] border border-border-panel rounded px-3 py-1.5 text-sm text-text-primary font-mono outline-none focus:border-accent-blue/60"
+          />
         </div>
 
         {/* Devices */}
@@ -345,7 +281,7 @@ export function NewTimelineDialog({
         <div className="flex gap-2">
           <button
             onClick={handleConfirm}
-            disabled={!query.trim() || isLoadingCalib}
+            disabled={!query.trim()}
             className="flex-1 py-1.5 rounded text-sm text-white font-medium bg-accent-blue/80 hover:bg-accent-blue disabled:opacity-40 transition-colors"
           >
             创建

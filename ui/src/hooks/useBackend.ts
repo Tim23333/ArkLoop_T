@@ -15,7 +15,6 @@ export interface TimelineSettings {
   wait_time3?: number
   bullet_threshold?: number
   frame_threshold?: number
-  calibration_path?: string
   breakpoints?: number[]
   devices?: MapDevice[]
 }
@@ -37,14 +36,12 @@ export interface TimelineData {
 
 export interface PyWebviewApi {
   init_app: () => Promise<{ ok: boolean; error?: string; avatars_loaded?: number }>
-  start_recording: (mapCode: string, maxTick?: number, calibrationPath?: string, fakeAvatar?: boolean, frameOffset?: number, recognizerState?: RecognizerState, devices?: MapDevice[]) => Promise<void>
+  start_recording: (mapCode: string, maxTick?: number, fakeAvatar?: boolean, frameOffset?: number, recognizerState?: RecognizerState, devices?: MapDevice[]) => Promise<void>
   stop_recording: () => Promise<AxisAction[]>
   pause_recording: () => Promise<{ frame: number; axis: AxisAction[] }>
   get_state: () => Promise<BackendState>
   get_axis: () => Promise<AxisAction[]>
   save_axis: (path: string) => Promise<boolean>
-  list_calibrations: () => Promise<string[]>
-  get_calibration_info: (path: string) => Promise<{ total_frames: number; screen_width: number; screen_height: number }>
   get_avatar_url: (oper: string) => Promise<string>
   list_timelines: () => Promise<string[]>
   load_timeline: (name: string) => Promise<TimelineData>
@@ -61,7 +58,7 @@ export interface PyWebviewApi {
   set_pinned_timelines: (pinned: string[]) => Promise<boolean>
   get_window_bounds: () => Promise<{ x: number; y: number; width: number; height: number }>
   set_bounds: (x: number, y: number, width: number, height: number) => Promise<void>
-  start_playback: (name: string, autoenter?: boolean, frameOffset?: number, breakpoints?: number[], calibrationPath?: string) => Promise<boolean>
+  start_playback: (name: string, autoenter?: boolean, frameOffset?: number, breakpoints?: number[]) => Promise<boolean>
   stop_playback: () => Promise<void>
   pause_playback: () => Promise<{ ok: boolean }>
   reset_playback_state: () => Promise<void>
@@ -162,13 +159,12 @@ export function useBackend() {
     async (
       mapCode: string,
       maxTick?: number,
-      calibrationPath?: string,
       frameOffset?: number,
       recognizerState?: RecognizerState,
       devices?: MapDevice[],
     ) => {
       if (!api) throw new Error('pywebview.api not available')
-      return api.start_recording(mapCode, maxTick, calibrationPath, undefined, frameOffset, recognizerState, devices)
+      return api.start_recording(mapCode, maxTick, undefined, frameOffset, recognizerState, devices)
     },
     [api],
   )
@@ -196,16 +192,6 @@ export function useBackend() {
   const saveAxis = useCallback(async (path: string) => {
     if (!api) return false
     return api.save_axis(path)
-  }, [api])
-
-  const listCalibrations = useCallback(async () => {
-    if (!api) return [] as string[]
-    return api.list_calibrations()
-  }, [api])
-
-  const getCalibrationInfo = useCallback(async (path: string) => {
-    if (!api) return { total_frames: 0, screen_width: 0, screen_height: 0 }
-    return api.get_calibration_info(path)
   }, [api])
 
   const getAvatarUrl = useCallback(async (oper: string) => {
@@ -295,9 +281,9 @@ export function useBackend() {
   }, [api])
 
   const startPlayback = useCallback(
-    async (name: string, autoenter?: boolean, frameOffset?: number, breakpoints?: number[], calibrationPath?: string) => {
+    async (name: string, autoenter?: boolean, frameOffset?: number, breakpoints?: number[]) => {
       if (!api) return false
-      return api.start_playback(name, autoenter, frameOffset, breakpoints, calibrationPath)
+      return api.start_playback(name, autoenter, frameOffset, breakpoints)
     },
     [api],
   )
@@ -379,8 +365,6 @@ export function useBackend() {
     getState,
     getAxis,
     saveAxis,
-    listCalibrations,
-    getCalibrationInfo,
     getAvatarUrl,
     listTimelines,
     loadTimeline,

@@ -56,7 +56,7 @@ class FrameSource:
         """Return the most recently captured frame and its timestamp.
 
         Unlike ``get_frame``, this does not remove the frame from the queue,
-        so other consumers (e.g. ``AnalysisWorker``) can still read it.
+        so other consumers can still read it.
         """
         return self._last_frame, self._last_timestamp
 

@@ -48,25 +48,16 @@ except Exception as _exc:
     print(f"[spec] torch not collected: {_exc}")
 hiddenimports += torch_hidden
 
-# Tesseract-OCR is optional: tesserocr has no Python 3.12 wheel and the live
-# pipeline degrades gracefully without it (pause-detection OCR only).  Only
-# bundle it + the tessdata runtime hook when the folder is staged at root.
-_has_tesseract = os.path.isdir(os.path.join(SPECPATH, 'Tesseract-OCR'))
-
 datas = [
     ('ui/dist',             'ui/dist'),
     ('resource',            'resource'),
-    ('calibration',         'calibration'),
     ('hook',                'hook'),
     ('config.example.json', '.'),
     ('src/maa/nodes',                  'src/maa/nodes'),    # MAA pipeline + OCR model weights
     ('src/maa/prts_plus_override.json', 'src/maa'),         # project-specific ROI overrides
 ] + maa_datas + torch_datas
 binaries = list(torch_bins)
-if _has_tesseract:
-    datas.append(('Tesseract-OCR', 'Tesseract-OCR'))
-
-runtime_hooks = ['pyi_rth_tessdata.py'] if _has_tesseract else []
+runtime_hooks = []
 
 a = Analysis(
     ['scripts/arkloop_webview.py'],

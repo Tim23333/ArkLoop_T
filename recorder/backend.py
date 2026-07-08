@@ -1,6 +1,6 @@
 """Real-time action recognition backend with live axis generation.
 
-This module encapsulates the frame capture, cost-bar analysis, mouse recording,
+This module encapsulates the frame capture, mouse recording,
 semantic recognition and live axis-building logic that was previously bundled in
 ``scripts/test_action_state_machine.py``.  It is designed to be imported by a
 frontend monitor script or run standalone via ``scripts/run_action_backend.py``.
@@ -73,15 +73,8 @@ class SlotAvatarMatcher:
         return None, 0.0
 
 
-def resolve_max_tick(max_tick: Optional[int], calibration_path: Optional[Path]) -> int:
-    """Resolve ``max_tick`` for the (cycle, tick) decomposition of frame_count.
-
-    Time itself now comes from the WS feed; ``max_tick`` is only the
-    per-timeline divisor (default 30).  ``calibration_path`` is accepted for
-    API compatibility but no longer read — cost-bar calibration is retired for
-    live recording.
-    """
-    _ = calibration_path  # deprecated; kept for API compatibility
+def resolve_max_tick(max_tick: Optional[int]) -> int:
+    """Resolve legacy ``max_tick`` metadata for timeline compatibility."""
     if max_tick is not None:
         return max_tick
     return 30
@@ -203,12 +196,10 @@ class ActionBackend:
         self,
         map_code: str,
         max_tick: Optional[int] = None,
-        calibration_path: Optional[Path] = None,
         event_callback: Optional[Callable[..., None]] = None,
         semantic_callback: Optional[Callable[[SemanticAction], None]] = None,
         use_slot_layout: bool = True,
         avatar_threshold: float = imgconfig.TEMPLATE_MATCH_THRESHOLD,
-        cost_bar: bool = True,
         fake_avatar: bool = False,
         frame_offset: int = 0,
         recognizer_state: Optional[Dict[str, Any]] = None,
@@ -220,13 +211,11 @@ class ActionBackend:
     ) -> None:
         self.map_code = map_code
         self.map_data = get_map_by_code(map_code)
-        self.calibration_path = calibration_path
-        self.max_tick = resolve_max_tick(max_tick, calibration_path)
+        self.max_tick = resolve_max_tick(max_tick)
         self.event_callback = event_callback
         self._external_semantic_callback = semantic_callback
         self.use_slot_layout = use_slot_layout
         self.avatar_threshold = avatar_threshold
-        self.cost_bar = cost_bar
         self.fake_avatar = fake_avatar
         # Resume-recording bias: emitted actions get frame += frame_offset.
         self.frame_offset = frame_offset
@@ -297,7 +286,7 @@ class ActionBackend:
                 logger.warning(f"Failed to start frame source: {exc}")
 
         # Game time now comes from the WS time source (process singleton
-        # started in init_app), so there is no cost-bar AnalysisWorker here.
+        # started in init_app), so no frame-analysis time worker is needed.
         # The FrameSource above is kept purely for vision (avatar matching +
         # side-view OCR) — it no longer drives the time axis.
         self.analysis_worker = None
@@ -550,19 +539,15 @@ def _main() -> None:
     parser = argparse.ArgumentParser(description="Live action backend.")
     parser.add_argument("--map-code", default="1-7", help="Map code, e.g. 1-7")
     parser.add_argument("--max-tick", type=int, default=None, help="Max tick per cycle")
-    parser.add_argument("--calibration", type=Path, default=None, help="Calibration JSON path")
     parser.add_argument("--duration", type=float, default=None, help="Run duration in seconds")
     parser.add_argument("--output", type=Path, default=None, help="Output axis JSON path")
     parser.add_argument("--fake-avatar", action="store_true", help="Use slot-based fake avatar matcher")
-    parser.add_argument("--no-cost-bar", action="store_true", help="Disable cost-bar analysis")
     args = parser.parse_args()
 
     backend = ActionBackend(
         map_code=args.map_code,
         max_tick=args.max_tick,
-        calibration_path=args.calibration,
         fake_avatar=args.fake_avatar,
-        cost_bar=not args.no_cost_bar,
     ).start()
 
     def _stop(_signum, _frame):

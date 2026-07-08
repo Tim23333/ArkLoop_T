@@ -33,7 +33,6 @@ _SETTING_KEYS = {
     "wait_time3",
     "bullet_threshold",
     "frame_threshold",
-    "calibration_path",
     "breakpoints",
 }
 
@@ -43,7 +42,7 @@ def _parse_action(raw: Dict[str, Any], row: int, max_tick: int = 30) -> Action:
 
     Supports two time formats:
     - New: ``{"frame": 1190, ...}`` — absolute frame count.
-    - Legacy: ``{"cycle": 10, "tick": 0, ...}`` — cost-bar decomposition
+    - Legacy: ``{"cycle": 10, "tick": 0, ...}`` — legacy cycle/tick timing
       (converted to frame = cycle * max_tick + tick).
     """
     try:

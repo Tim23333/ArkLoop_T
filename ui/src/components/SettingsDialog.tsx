@@ -16,9 +16,8 @@ interface SettingsDialogProps {
  * filesystem read doesn't stall app startup.
  *
  * Edits the MuMu install path + instance index (the bits that were hardcoded
- * before) and the WebSocket time-source URL (the sole game-time provider,
- * replacing cost-bar calibration). New fields go here as more settings move
- * out of `src/config.py`.
+ * before) and the WebSocket time-source URL (the sole game-time provider).
+ * New fields go here as more settings move out of `src/config.py`.
  */
 export function SettingsDialog({
   open,
@@ -216,7 +215,7 @@ export function SettingsDialog({
               </div>
               <div className="text-[11px] text-text-dim leading-relaxed">
                 外部游戏时间服务推送 <span className="font-mono">{'{game_time, frame_count, connected}'}</span>，
-                作为时间轴的唯一时间来源（已替代费用条校准）。修改后点"测试连接"立即生效，或保存后重启。
+                作为时间轴的唯一时间来源。修改后点"测试连接"立即生效，或保存后重启。
               </div>
             </div>
           </>

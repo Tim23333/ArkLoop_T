@@ -1,8 +1,7 @@
 """Game-time reader backed by the WebSocket time source.
 
 ``get_game_time()`` returns the current absolute ``frame_count`` from the WS
-feed.  The cost-bar cycle/tick model is removed — all timing uses the raw
-frame count directly.
+feed. All timing uses the raw frame count directly; legacy cycle/tick values are converted at JSON load time.
 """
 
 from __future__ import annotations

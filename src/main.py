@@ -1,10 +1,6 @@
 import argparse
 import logging
-import os
 
-from src.frame.calibration import calibrate, save_calibration_data
-from src.frame.detector import CostBarDetector
-from src.config import ImageProcessingConfig as imgconfig
 from src.logger import logger
 from src.excel import Excel, StatusColor
 from src.axis.json_loader import load_axis_from_json
@@ -64,7 +60,7 @@ def _run_excel(xlsm_file: str, debug: bool, autoenter: bool):
         frame_threshold = excel.get_setting('frame_threshold')
 
         # Game time now comes from the WS time source (external game-memory
-        # reader); cost-bar calibration is no longer the time provider.  Start
+        # reader). Start
         # the singleton and refuse to run when the feed is unavailable.
         ws = get_ws_time_source()
         ws.start()
@@ -167,62 +163,12 @@ def _run_excel(xlsm_file: str, debug: bool, autoenter: bool):
             input()
 
 
-def _load_calibration_for_standard_resolution():
-    """Load the newest calibration for the standardized screen size if present."""
-    std_w, std_h = imgconfig.SCREEN_STANDARD_SIZE
-    detector = CostBarDetector.from_resolution(std_w, std_h)
-    if detector.is_ready():
-        try:
-            GameTime.apply_calibration(detector.calibration_data)
-        except ValueError as e:
-            logger.warning(f"Failed to apply calibration: {e}")
-    else:
-        logger.warning(
-            f"No cost bar calibration found for {std_w}x{std_h}. "
-            "Run with --calibrate to create one. Legacy white-pixel fallback will be used."
-        )
-
-
-def _run_calibration(num_cycles: int = 6):
-    """Run the cost bar calibration flow and save the result."""
-    from PIL import Image
-    from src.mumu.mumu_vision import capture_game_window
-
-    logger.info("Starting cost bar calibration from command line.")
-
-    def capture_func():
-        gray = capture_game_window(ratio=None)
-        return Image.fromarray(gray).convert("RGB")
-
-    std_w, std_h = imgconfig.SCREEN_STANDARD_SIZE
-    # Warm up the capture pipeline once.
-    capture_func()
-
-    data = calibrate(capture_func, std_w, std_h, num_cycles=num_cycles)
-    filename = save_calibration_data(data, std_w, std_h, basename="default")
-    logger.info(f"Calibration saved as: {filename}")
-
-    # Verify by applying it immediately.
-    GameTime.apply_calibration(data)
-    logger.info(f"Verified TICK_MAX = {GameTime.get_tick_max()}")
-
-
-def main(axis_file, xlsm_file, debug, autoenter, calibrate_flag):
+def main(axis_file, xlsm_file, debug, autoenter):
     if debug:
         logger.setLevel(logging.DEBUG)
     else:
         logger.setLevel(logging.WARNING)
 
-    if calibrate_flag:
-        # Cost-bar calibration is vestigial now that the WS time source drives
-        # the time axis.  Kept for producing calibration files used by the
-        # offline video-analysis pipeline (offline_scanner / axis_writer).
-        _run_calibration(num_cycles=6)
-        return
-
-    # NOTE: time no longer requires cost-bar calibration (WS feed drives it).
-    # _run_json delegates to AxisRunner which starts the WS source itself;
-    # _run_excel starts the WS source directly.  No calibration preload needed.
     if axis_file:
         _run_json(axis_file, debug, autoenter)
     elif xlsm_file:
@@ -237,11 +183,10 @@ if __name__ == '__main__':
     parser.add_argument('--xlsm', type=str, help='The path to the Excel file.')
     parser.add_argument('--debug', action='store_true', help='Run in debug mode.')
     parser.add_argument('--autoenter', action='store_true', help='Run in auto enter mode.')
-    parser.add_argument('--calibrate', action='store_true', help='Run cost bar calibration and save the result.')
 
     args = parser.parse_args()
 
-    if not args.axis and not args.xlsm and not args.calibrate:
-        parser.error("Either --axis, --xlsm or --calibrate must be provided.")
+    if not args.axis and not args.xlsm:
+        parser.error("Either --axis or --xlsm must be provided.")
 
-    main(args.axis, args.xlsm, args.debug, args.autoenter, args.calibrate)
+    main(args.axis, args.xlsm, args.debug, args.autoenter)

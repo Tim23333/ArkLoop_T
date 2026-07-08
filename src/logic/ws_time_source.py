@@ -1,4 +1,4 @@
-"""WebSocket time source: a live game-time feed replaces cost-bar detection.
+"""WebSocket time source for the live game-time feed.
 
 Connects to an external service that reads the game's memory and pushes
 ``{game_time, frame_count, connected}`` over WebSocket.  ``frame_count`` is the

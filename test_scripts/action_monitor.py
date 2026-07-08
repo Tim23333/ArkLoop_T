@@ -172,8 +172,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Live action backend monitor.")
     parser.add_argument("--map-code", default="1-7", help="Map code, e.g. 1-7")
     parser.add_argument("--max-tick", type=int, default=None, help="Max tick per cycle")
-    parser.add_argument("--calibration", type=Path, default=None, help="Calibration JSON path")
-    parser.add_argument("--no-cost-bar", action="store_true", help="Disable cost-bar analysis")
     parser.add_argument("--save-axis", type=Path, default=None, help="Save axis JSON on stop")
     args = parser.parse_args()
 
@@ -182,9 +180,7 @@ def main() -> None:
     backend = ActionBackend(
         map_code=args.map_code,
         max_tick=args.max_tick,
-        calibration_path=args.calibration,
         event_callback=on_event,
-        cost_bar=not args.no_cost_bar,
     ).start()
 
     overlay = StateOverlay(backend).start()

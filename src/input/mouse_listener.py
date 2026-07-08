@@ -49,7 +49,7 @@ class MouseListener:
 
     Timestamps are captured with ``time.perf_counter()`` and are relative to the
     moment ``start()`` is called, which makes them directly comparable to the
-    timestamps produced by ``VideoRecorder``.
+    timestamps produced by the live recorder.
 
     Args:
         callback: Optional callback invoked for each captured event. Note that

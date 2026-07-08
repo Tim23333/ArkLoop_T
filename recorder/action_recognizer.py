@@ -40,6 +40,7 @@ from src.config import InputRecordingConfig as inputconfig
 from src.config import DebugConfig
 from src.logic.calc_view import transform_map_to_view, transform_tile_to_view, transform_view_to_map
 from src.logger import logger
+from src.utils.image_io import write_image
 
 __all__ = [
     "ActionType",
@@ -692,7 +693,7 @@ class ActionRecognizer:
         with open(session_dir / "action.json", "w", encoding="utf-8") as f:
             json.dump(action_info, f, ensure_ascii=False, indent=2)
 
-        cv2.imwrite(str(session_dir / "frame.png"), annotated)
+        write_image(session_dir / "frame.png", annotated)
         logger.debug(f"Archived recognition warning to {session_dir}")
         return session_dir
 

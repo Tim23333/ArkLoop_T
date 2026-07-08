@@ -8,87 +8,12 @@ import { SettingsDialog } from './components/SettingsDialog'
 import { OperatorSearchDialog } from './components/OperatorSearchDialog'
 import { ResizeHandles } from './components/ResizeHandles'
 import { useBackend } from './hooks/useBackend'
-import type { AxisAction, AxisBlock, ActionRow, OperatorInfo, RecognizerState } from './types'
+import { useTimelineEditor } from './hooks/useTimelineEditor'
+import { compareActionTime, formatGameTime } from './utils/timeline'
+import type { AxisAction, OperatorInfo, RecognizerState } from './types'
 import type { TimelineSettings, TimelinePreset } from './hooks/useBackend'
 import type { NewTimelineResult } from './components/NewTimelineDialog'
 
-function compareActionTime(a: AxisAction, b: AxisAction): number {
-  return (a.frame ?? 0) - (b.frame ?? 0)
-}
-
-/** Format a game-time value (float seconds) as M:SS.cs for the live readout. */
-function formatGameTime(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds < 0) return '0:00.00'
-  const totalCs = Math.floor(seconds * 100)
-  const cs = totalCs % 100
-  const totalSec = Math.floor(totalCs / 100)
-  const s = totalSec % 60
-  const m = Math.floor(totalSec / 60)
-  return `${m}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`
-}
-
-/** Insert a single action into a chronologically sorted action list.
- *  Finds the last action whose (cycle, tick) <= the new action and places
- *  the new action right after it; if every action is later, it goes first.
- */
-function insertActionSorted(actions: AxisAction[], action: AxisAction): AxisAction[] {
-  let insertIndex = 0
-  for (let i = actions.length - 1; i >= 0; i--) {
-    if (compareActionTime(actions[i], action) <= 0) {
-      insertIndex = i + 1
-      break
-    }
-  }
-  const next = actions.slice()
-  next.splice(insertIndex, 0, action)
-  return next
-}
-
-/** Insert a group of actions (sharing the same target time) while preserving
- *  the relative order of the group and of the existing actions.
- */
-function insertActionsAtTime(actions: AxisAction[], group: AxisAction[]): AxisAction[] {
-  if (group.length === 0) return actions
-  const target = group[0]
-  let insertIndex = 0
-  for (let i = actions.length - 1; i >= 0; i--) {
-    if (compareActionTime(actions[i], target) <= 0) {
-      insertIndex = i + 1
-      break
-    }
-  }
-  const next = actions.slice()
-  next.splice(insertIndex, 0, ...group)
-  return next
-}
-
-/** Move every action that belongs to a timeline block to a new frame
- *  and re-position the whole group in chronological order.
- */
-function moveBlockToFrame(
-  actions: AxisAction[],
-  block: AxisBlock,
-  newFrame: number,
-): AxisAction[] {
-  const typeStr = block.row === 'deploy' ? '部署' : block.row === 'skill' ? '技能' : '撤退'
-  const moving: AxisAction[] = []
-  const remaining = actions.filter((a) => {
-    if (a.action_type === typeStr && a.frame === block.frame) {
-      moving.push({ ...a, frame: newFrame })
-      return false
-    }
-    return true
-  })
-  return insertActionsAtTime(remaining, moving)
-}
-
-interface EditDialogState {
-  mode: 'add' | 'edit'
-  row: ActionRow
-  frame: number
-  existingAction?: AxisAction
-  blockIndex?: number  // index in loadedAxis for edit mode
-}
 
 export default function App() {
   const {
@@ -121,8 +46,6 @@ export default function App() {
     resetPlaybackState,
     listOperators,
     listMaps,
-    listCalibrations,
-    getCalibrationInfo,
     listTimelinePresets,
     saveTimelinePreset,
     deleteTimelinePreset,
@@ -156,14 +79,12 @@ export default function App() {
     listOperators().then((ops) => setOperatorList(ops)).catch(() => {})
   }, [api, listOperators])
 
-  // ── map & calibration data (for new timeline dialog) ────────
+  // ── map data (for new timeline dialog) ────────
   const [mapList, setMapList] = useState<Array<{ code: string; name: string }>>([])
-  const [calibrationList, setCalibrationList] = useState<string[]>([])
   useEffect(() => {
     if (!api) return
     listMaps().then(setMapList).catch(() => {})
-    listCalibrations().then(setCalibrationList).catch(() => {})
-  }, [api, listMaps, listCalibrations])
+  }, [api, listMaps])
 
   const [showNewTimelineDialog, setShowNewTimelineDialog] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
@@ -259,7 +180,6 @@ export default function App() {
       await startRecording(
         mapCode,
         timelineSettings.max_tick,
-        timelineSettings.calibration_path,
         frameOffset,
         isResume ? recognizerState : {},
         timelineSettings.devices,
@@ -353,7 +273,7 @@ export default function App() {
 
   const handleNewTimelineConfirm = useCallback(
     async (result: NewTimelineResult) => {
-      const { mapCode, mapName, calibration, maxTick, devices } = result
+      const { mapCode, mapName, maxTick, devices } = result
       setShowNewTimelineDialog(false)
       try {
         const name = await createTimeline()
@@ -361,7 +281,6 @@ export default function App() {
           map_code: mapCode,
           map_name: mapName || undefined,
           max_tick: maxTick,
-          calibration_path: calibration || undefined,
           wait_time1: 0.02,
           wait_time2: 0.1,
           wait_time3: 0.3,
@@ -487,7 +406,6 @@ export default function App() {
         autoEnter,
         frameOffset,
         bps,
-        timelineSettings.calibration_path,
       )
       setIsPlaying(true)
     } catch (e) {
@@ -637,83 +555,23 @@ export default function App() {
     return () => { cancelled = true }
   }, [api, deployedOperatorNames, getAvatarUrl])
 
-  // ── editing ──────────────────────────────────────────────────
-  const [editDialog, setEditDialog] = useState<EditDialogState | null>(null)
-
-  const saveAxis = useCallback(async (newAxis: AxisAction[]) => {
-    setLoadedAxis(newAxis)
-    if (selectedTimeline) {
-      await saveTimeline(selectedTimeline, newAxis, timelineSettings).catch(() => {})
-    }
-  }, [selectedTimeline, saveTimeline, timelineSettings])
-
-  const handleAddAction = useCallback((row: ActionRow, frame: number) => {
-    if (isRecording || isPlaying) return
-    setEditDialog({ mode: 'add', row, frame })
-  }, [isRecording, isPlaying])
-
-  const handleEditAction = useCallback((block: AxisBlock) => {
-    if (isRecording || isPlaying) return
-    const action = block.actions[0]
-    if (!action) return
-    setEditDialog({
-      mode: 'edit',
-      row: block.row,
-      frame: block.frame,
-      existingAction: action,
-    })
-  }, [isRecording, isPlaying])
-
-  const handleMoveAction = useCallback(async (block: AxisBlock, newFrame: number) => {
-    if (isRecording || isPlaying) return
-    if (block.frame === newFrame) return
-    const newAxis = moveBlockToFrame(loadedAxis, block, newFrame)
-    await saveAxis(newAxis)
-  }, [isRecording, isPlaying, loadedAxis, saveAxis])
-
-  const handleDeleteAction = useCallback(async (block: AxisBlock) => {
-    if (isRecording || isPlaying) return
-    const typeStr = block.row === 'deploy' ? '部署' : block.row === 'skill' ? '技能' : '撤退'
-    const newAxis = loadedAxis.filter(
-      (a) => !(a.action_type === typeStr && a.frame === block.frame)
-    )
-    await saveAxis(newAxis)
-  }, [isRecording, isPlaying, loadedAxis, saveAxis])
-
-  const handleEditConfirm = useCallback(async (action: AxisAction) => {
-    if (!editDialog) return
-    let newAxis: AxisAction[]
-    if (editDialog.mode === 'add') {
-      newAxis = insertActionSorted(loadedAxis, action)
-    } else {
-      const typeStr = editDialog.row === 'deploy' ? '部署' : editDialog.row === 'skill' ? '技能' : '撤退'
-      const timeChanged = action.frame !== editDialog.frame
-      if (!timeChanged) {
-        let replaced = false
-        newAxis = loadedAxis.map((a) => {
-          if (!replaced && a.action_type === typeStr && a.frame === editDialog.frame) {
-            replaced = true
-            return action
-          }
-          return a
-        })
-        if (!replaced) newAxis = insertActionSorted(loadedAxis, action)
-      } else {
-        let removed = false
-        const remaining = loadedAxis.filter((a) => {
-          if (!removed && a.action_type === typeStr && a.frame === editDialog.frame) {
-            removed = true
-            return false
-          }
-          return true
-        })
-        newAxis = insertActionSorted(remaining, action)
-      }
-    }
-    await saveAxis(newAxis)
-    setEditDialog(null)
-  }, [editDialog, loadedAxis, saveAxis])
-
+  const {
+    editDialog,
+    setEditDialog,
+    handleAddAction,
+    handleEditAction,
+    handleMoveAction,
+    handleDeleteAction,
+    handleEditConfirm,
+  } = useTimelineEditor({
+    loadedAxis,
+    setLoadedAxis,
+    selectedTimeline,
+    timelineSettings,
+    saveTimeline,
+    isRecording,
+    isPlaying,
+  })
   return (
     <div className="w-full h-full min-w-[946px] bg-root flex flex-col overflow-hidden">
       {/* Top: sidebar + workspace — flex-[11] to make timeline ~0.8× smaller */}
@@ -842,9 +700,7 @@ export default function App() {
       {showNewTimelineDialog && (
         <NewTimelineDialog
           maps={mapList}
-          calibrations={calibrationList}
           presets={presets}
-          getCalibrationInfo={getCalibrationInfo}
           onConfirm={handleNewTimelineConfirm}
           onDismiss={() => setShowNewTimelineDialog(false)}
           onSavePreset={handleSavePreset}

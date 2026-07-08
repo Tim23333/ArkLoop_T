@@ -77,21 +77,20 @@ dist\ArkLoop\ArkLoop.exe
 
 ```text
 scripts/                正式入口
-  arkloop_webview.py    PyWebview 桌面端主入口
-  calibrate.py          费用条校准工具
+  arkloop_webview.py    PyWebview + React 桌面端主入口
   run.py                旧版 CLI 回放入口
 src/                    核心逻辑
+  desktop/              PyWebview API 服务：配置、时间轴、资源、状态发布
   mumu/                 MuMu 模拟器连接、截图、输入注入
-  frame/                费用条检测、暂停检测、帧源
-  logic/                坐标投影、动作执行、时间源
-  axis/                 轴执行器、JSON 加载
+  frame/                实时帧源
+  logic/                坐标投影、动作执行、WebSocket 时间源
+  axis/                 时间轴执行器、JSON 加载
   maa/                  MAA 识别相关配置与节点
 recorder/               实时录制后端与动作识别
 ui/                     React + Vite + Tailwind 时间轴编辑器
 test_scripts/           开发调试脚本
 tools/                  资源同步与预处理脚本
 resource/               游戏数据：头像、地图、干员/关卡映射表
-calibration/            费用条校准文件
 timelines/              用户时间轴（运行时生成，已 gitignore）
 ```
 
@@ -104,7 +103,6 @@ timelines/              用户时间轴（运行时生成，已 gitignore）
 ### 依赖
 
 - [MaaFramework](https://github.com/MaaXYZ/MaaFramework) — 图像识别自动化框架
-- [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) — OCR 识别
 - [PyWebview](https://pywebview.flowrl.com/) — 桌面 WebView 容器
 - [React](https://react.dev/) / [Vite](https://vitejs.dev/) / [Tailwind CSS](https://tailwindcss.com/) — 前端编辑器
 - [Python](https://www.python.org/) / [OpenCV](https://opencv.org/) / [NumPy](https://numpy.org/) / [Pillow](https://python-pillow.org/)
@@ -113,7 +111,6 @@ timelines/              用户时间轴（运行时生成，已 gitignore）
 
 - [yuanyan3060/Arknights-Tile-Pos](https://github.com/yuanyan3060/Arknights-Tile-Pos) — 地图坐标数据
 - [yuanyan3060/ArknightsGameResource](https://github.com/yuanyan3060/ArknightsGameResource) — 干员头像等游戏资源
-- [Windsland52/ArknightsAutoOperator](https://github.com/Windsland52/ArknightsAutoOperator) — 帧级自动操作与费用条计时参考
+- [Windsland52/ArknightsAutoOperator](https://github.com/Windsland52/ArknightsAutoOperator) — 帧级自动操作参考
 - [MaaAssistantArknights](https://github.com/MaaAssistantArknights/MaaAssistantArknights) — 地图数据（`Arknights-Tile-Pos`）与粗流程参照
-- [ArknightsCostBarRuler](https://github.com/ZeroAd-06/ArknightsCostBarRuler) — 费用条计时 / 悬浮窗 / 打轴对轴参考
 - [prts-plus](https://github.com/jue-ce-zhe/prts-plus) — 帧级自动操作的执行器算法（action / 投影 / 配置）

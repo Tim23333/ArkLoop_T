@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, ClassVar, Dict
+from typing import ClassVar
 
 from src.config import GameTimeConfig as config
 
@@ -7,14 +7,14 @@ from src.config import GameTimeConfig as config
 @dataclass(order=True, frozen=True)
 class GameTime:
     """
-    Represents game time as a (cycle, tick) pair on the cost-bar axis.
+    Represents legacy game time as a (cycle, tick) pair.
 
     `cycle` is how many times the cost bar has wrapped from full back to empty
     since the battle started (NOT the in-game cost number).  `tick` is the
     logical frame within the current cycle, in [0, TICK_MAX).
 
     Class Attributes:
-        TICK_MAX: number of logical frames per cycle (from calibration).
+        TICK_MAX: number of logical frames per legacy cycle.
     """
 
     cycle: int
@@ -38,40 +38,6 @@ class GameTime:
     def get_tick_max(cls) -> int:
         """Get global maximum tick value."""
         return cls.TICK_MAX
-
-    @classmethod
-    def apply_calibration(cls, calibration_data: Dict[str, Any]):
-        """
-        Set TICK_MAX from a calibration data dict.
-
-        Uses the first profile's total_frames by default.  Multi-profile
-        (alternating) calibration is supported by the file format but not
-        needed for the current tick detection pipeline.
-        """
-        profiles = calibration_data.get("profiles")
-        if not profiles:
-            raise ValueError("Calibration data contains no profiles.")
-        total_frames = profiles[0].get("total_frames")
-        if total_frames is None:
-            raise ValueError("Calibration profile missing total_frames.")
-        cls.set_tick_max(int(total_frames))
-        logger = __import__("src.logger", fromlist=["logger"]).logger
-        logger.info(f"Set TICK_MAX to {cls.TICK_MAX} from calibration.")
-
-    @classmethod
-    def apply_calibration_if_available(cls, width: int, height: int) -> bool:
-        """
-        Try to load and apply the newest calibration for the given resolution.
-
-        Returns True if a calibration was found and applied, False otherwise.
-        """
-        from src.frame.calibration import find_calibration
-
-        data = find_calibration(width, height)
-        if data is None:
-            return False
-        cls.apply_calibration(data)
-        return True
 
     def __add__(self, other: 'GameTime') -> 'GameTime':
         total_cycle = self.cycle + other.cycle + (self.tick + other.tick) // self.TICK_MAX

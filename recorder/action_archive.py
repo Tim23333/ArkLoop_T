@@ -11,10 +11,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-import cv2
 import numpy as np
 
 from src.logger import logger
+from src.utils.image_io import write_image
 
 __all__ = ["ActionArchive"]
 
@@ -122,7 +122,7 @@ class ActionArchive:
             json.dump(action_info, f, ensure_ascii=False, indent=2)
 
         if frame is not None:
-            cv2.imwrite(str(folder / "frame.png"), frame)
+            write_image(folder / "frame.png", frame)
 
         archive_state = {
             "semantic": semantic_dict,

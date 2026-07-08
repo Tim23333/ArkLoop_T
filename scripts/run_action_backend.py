@@ -2,7 +2,6 @@
 
 Usage:
     .venv\Scripts\python scripts/run_action_backend.py --map-code 1-7 --duration 30
-    .venv\Scripts\python scripts/run_action_backend.py --map-code 1-7 --calibration calibration/default_30f_1280x720.json
     .venv\Scripts\python scripts/run_action_backend.py --map-code 1-7 --max-tick 30
 
 Press Ctrl+C to stop early.
@@ -38,11 +37,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run action backend and write axis JSON.")
     parser.add_argument("--map-code", default="1-7", help="Map code, e.g. 1-7")
     parser.add_argument("--max-tick", type=int, default=None, help="Max tick per cycle")
-    parser.add_argument("--calibration", type=Path, default=None, help="Calibration JSON path")
     parser.add_argument("--duration", type=float, default=None, help="Run duration in seconds")
     parser.add_argument("--output", type=Path, default=None, help="Output axis JSON path")
     parser.add_argument("--fake-avatar", action="store_true", help="Use slot-based fake avatar matcher")
-    parser.add_argument("--no-cost-bar", action="store_true", help="Disable cost-bar analysis")
     parser.add_argument("--quiet", action="store_true", help="Suppress event printing")
     args = parser.parse_args()
 
@@ -68,10 +65,8 @@ def main() -> None:
     backend = ActionBackend(
         map_code=args.map_code,
         max_tick=args.max_tick,
-        calibration_path=args.calibration,
         event_callback=_print_event,
         fake_avatar=args.fake_avatar,
-        cost_bar=not args.no_cost_bar,
     ).start()
 
     running = True
