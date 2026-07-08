@@ -84,13 +84,25 @@ def perform_deploy(
     # Note: Pause invariant: Here the game is paused
     # and also, we have selected the last operator to be under bullet time
     # Now, proceed frame by frame until we reach the target time.
-    # Each pause/esc cycle advances the game by exactly one frame.
-    # A small sleep after esc() lets the game register the pause command.
+    # Each cycle: unpause (pause) → wait one frame → re-pause (esc).
+    # Verify pause state: if the frame is still advancing, the game is NOT
+    # paused — send esc() until it stops.
+    for i in range(5):
+        f1 = get_game_time()
+        time.sleep(0.03)
+        f2 = get_game_time()
+        if f2 <= f1:
+            logger.debug(f"Game confirmed paused at frame {f2} (attempt {i})")
+            break  # game is paused
+        logger.warning(f"Game not paused (frame {f1}->{f2}), sending esc (attempt {i})")
+        esc()
+        time.sleep(actionconfig.MINIMUM_WAITTIME)
+
     while get_game_time() < target_frame:
-        pause()                          # unpause (toggle)
+        pause()                          # unpause
         wait_for_game_time_update(timeout=0.05)  # wait for next frame
-        esc()                            # pause (toggle back)
-        time.sleep(actionconfig.MINIMUM_WAITTIME)  # 20ms — let game register pause
+        esc()                            # re-pause
+        time.sleep(actionconfig.MINIMUM_WAITTIME)  # let game register
 
     # Finally, do the action — game is paused at exactly target_frame.
     # Find the avatar position
@@ -221,11 +233,20 @@ def perform_select(
     # Note: Pause invariant: Here the game is paused
     # and also, we have selected the target operator to be under bullet time
     # Now, proceed frame by frame until we reach the target time.
-    # Each pause/esc cycle advances the game by exactly one frame.
+    # Verify pause state first.
+    for _ in range(5):
+        f1 = get_game_time()
+        time.sleep(0.03)
+        f2 = get_game_time()
+        if f2 <= f1:
+            break
+        esc()
+        time.sleep(actionconfig.MINIMUM_WAITTIME)
+
     while get_game_time() < target_frame:
-        pause()                          # unpause (toggle)
+        pause()                          # unpause
         wait_for_game_time_update(timeout=0.05)  # wait for next frame
-        esc()                            # pause (toggle back)
+        esc()                            # re-pause
         time.sleep(actionconfig.MINIMUM_WAITTIME)  # 20ms — let game register pause
 
     # Check if we are on time
