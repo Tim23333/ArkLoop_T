@@ -105,6 +105,7 @@ def perform_deploy(
         time.sleep(actionconfig.MINIMUM_WAITTIME)  # let game register
 
     # Finally, do the action — game is paused at exactly target_frame.
+    # ALL deploy steps happen while paused: the game supports paused deployment.
     # Find the avatar position
     locate_avatar(action)
 
@@ -115,7 +116,7 @@ def perform_deploy(
     else:
         # Select the operator
         mouseclick(action.avatar_pos)
-        time.sleep(actionconfig.GENERAL_WAITTIME)
+        time.sleep(actionconfig.MINIMUM_WAITTIME)
 
         # Now the operator is selected, find avatar position again since it may have changed
         locate_avatar(action)
@@ -126,33 +127,16 @@ def perform_deploy(
         action.avatar_pos[1] - ratioconfig.DEPLOY_DRAG_RATIO,
     )
 
-    # Note: Pause invariant: Here the game is paused
-
-    # Final check if user paused
-    if user_paused():
-        raise UserPausedError()
-
-    # Deploy the operator
-    pause()
+    # Deploy the operator (paused — no pause()/esc() needed)
     mousedown(action.avatar_pos)
     mousemove(middle_pos)
     time.sleep(actionconfig.MINIMUM_WAITTIME)
-    esc()
-    time.sleep(actionconfig.GENERAL_WAITTIME)
 
-    # Check if we are on time
-    actual_frame = get_game_time()
-    if actual_frame != target_frame:
-        logger.warning(
-            f"Game time mismatch, performed action at frame {actual_frame} "
-            f"instead of frame {target_frame}"
-        )
-
-    # Do the rest of the deploy
+    # Move to final position and release
     mousemove((action.view_pos_side[0], action.view_pos_side[1] + ratioconfig.DEPLOY_DELTA_RATIO))
-    time.sleep(actionconfig.GENERAL_WAITTIME)
+    time.sleep(actionconfig.MINIMUM_WAITTIME)
     mouseup((action.view_pos_side[0], action.view_pos_side[1] + ratioconfig.DEPLOY_DELTA_RATIO))
-    time.sleep(actionconfig.GENERAL_WAITTIME)
+    time.sleep(actionconfig.MINIMUM_WAITTIME)
 
     # Set the direction
     dir_pos = None
@@ -178,14 +162,14 @@ def perform_deploy(
         )
     if dir_pos:
         mousedown(action.view_pos_side)
-        time.sleep(actionconfig.GENERAL_WAITTIME)
+        time.sleep(actionconfig.MINIMUM_WAITTIME)
         mousemove(dir_pos)
-        time.sleep(actionconfig.GENERAL_WAITTIME)
+        time.sleep(actionconfig.MINIMUM_WAITTIME)
         mouseup(dir_pos)
-        time.sleep(actionconfig.GENERAL_WAITTIME)
+        time.sleep(actionconfig.MINIMUM_WAITTIME)
 
     # Note: Pause invariant: Here the game is paused
-    return actual_frame
+    return get_game_time()
 
 
 def perform_select(
@@ -273,13 +257,13 @@ def perform_skill_or_retreat(
     if user_paused():
         raise UserPausedError()
 
-    # Finally, do the action
+    # Finally, do the action (game is paused — click works in pause mode)
     if action.action_type == ActionType.SKILL:
         mouseclick(ratioconfig.SKILL_RATIO)
-        time.sleep(actionconfig.GENERAL_WAITTIME)
+        time.sleep(actionconfig.MINIMUM_WAITTIME)
     elif action.action_type == ActionType.RETREAT:
         mouseclick(ratioconfig.RETREAT_RATIO)
-        time.sleep(actionconfig.GENERAL_WAITTIME)
+        time.sleep(actionconfig.MINIMUM_WAITTIME)
     else:
         raise ValueError(f"Invalid action type: {action.action_type}")
 
