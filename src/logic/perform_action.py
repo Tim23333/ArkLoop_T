@@ -83,17 +83,15 @@ def perform_deploy(
 
     # Note: Pause invariant: Here the game is paused
     # and also, we have selected the last operator to be under bullet time
-    # Now, proceed frame by frame until we reach the target time
+    # Now, proceed frame by frame until we reach the target time.
+    # Each pause/esc cycle advances the game by exactly one frame (~8 ms).
+    # No sleep between cycles — we step as fast as the WS feed delivers frames.
     while get_game_time() < target_frame:
-        pause()
-        # Wait for the next WS frame instead of a fixed sleep.
-        wait_for_game_time_update(timeout=0.05)
-        esc()
-        if user_paused():
-            raise UserPausedError()
-        time.sleep(actionconfig.GENERAL_WAITTIME)
+        pause()                          # unpause (toggle)
+        wait_for_game_time_update(timeout=0.05)  # wait for next frame
+        esc()                            # pause (toggle back)
 
-    # Finally, do the action
+    # Finally, do the action — game is paused at exactly target_frame.
     # Find the avatar position
     locate_avatar(action)
 
@@ -221,15 +219,12 @@ def perform_select(
 
     # Note: Pause invariant: Here the game is paused
     # and also, we have selected the target operator to be under bullet time
-    # Now, proceed frame by frame until we reach the target time
+    # Now, proceed frame by frame until we reach the target time.
+    # Each pause/esc cycle advances the game by exactly one frame (~8 ms).
     while get_game_time() < target_frame:
-        pause()
-        # Wait for the next WS frame instead of a fixed sleep.
-        wait_for_game_time_update(timeout=0.05)
-        esc()
-        if user_paused():
-            raise UserPausedError()
-        time.sleep(actionconfig.GENERAL_WAITTIME)
+        pause()                          # unpause (toggle)
+        wait_for_game_time_update(timeout=0.05)  # wait for next frame
+        esc()                            # pause (toggle back)
 
     # Check if we are on time
     actual_frame = get_game_time()

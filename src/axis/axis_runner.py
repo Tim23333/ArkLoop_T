@@ -276,6 +276,20 @@ class AxisRunner:
         if self.autoenter and not self.is_paused():
             auto_enter()
 
+        # If the game frame is from a previous battle (high value), wait for
+        # it to reset to 0 — the WS frame_count resets when a new battle starts.
+        initial_frame = get_game_time()
+        if initial_frame > 30 and self.frame_offset <= 0:
+            logger.info(
+                f"[playback] game frame is {initial_frame}, waiting for new battle (frame reset to 0)..."
+            )
+            while not self.is_paused():
+                current = get_game_time()
+                if current <= 1:
+                    logger.info(f"[playback] frame reset detected (frame={current}), starting playback")
+                    break
+                time.sleep(0.05)
+
         # Set up observer for breakpoint checking on every get_game_time() read.
         def _game_time_observer(frame: int) -> None:
             self._check_breakpoints(frame)
