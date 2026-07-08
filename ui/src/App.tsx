@@ -399,12 +399,16 @@ export default function App() {
   const [pauseResult, setPauseResult] = useState<string>('')
 
   const handleDebugPause = useCallback(async () => {
-    if (!api) return
+    if (!api) { setPauseResult('API未就绪'); return }
     try {
       const r = await api.debug_pause()
-      setPauseResult(`帧 ${r.frame_before}→${r.frame_after} ${r.paused ? '已暂停' : '未暂停'}`)
-    } catch (e) {
-      setPauseResult('失败')
+      if (r.error) {
+        setPauseResult(`错误: ${r.error}`)
+      } else {
+        setPauseResult(`帧 ${r.frame_before}→${r.frame_after} ${r.paused ? '✓已暂停' : '✗未暂停'}`)
+      }
+    } catch (e: any) {
+      setPauseResult(`异常: ${e?.message ?? e}`)
     }
   }, [api])
 
