@@ -125,6 +125,7 @@ class ActionWorker:
             def _game_time(_action: Dict[str, Any]) -> Dict[str, Any]:
                 ts = item.tick_state or {}
                 return {
+                    "frame": ts.get("frame"),
                     "tick": ts.get("tick"),
                     "cycle": ts.get("cycle"),
                     "total_elapsed_frames": ts.get("total_elapsed_frames"),
