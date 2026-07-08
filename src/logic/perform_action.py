@@ -84,12 +84,13 @@ def perform_deploy(
     # Note: Pause invariant: Here the game is paused
     # and also, we have selected the last operator to be under bullet time
     # Now, proceed frame by frame until we reach the target time.
-    # Each pause/esc cycle advances the game by exactly one frame (~8 ms).
-    # No sleep between cycles — we step as fast as the WS feed delivers frames.
+    # Each pause/esc cycle advances the game by exactly one frame.
+    # A small sleep after esc() lets the game register the pause command.
     while get_game_time() < target_frame:
         pause()                          # unpause (toggle)
         wait_for_game_time_update(timeout=0.05)  # wait for next frame
         esc()                            # pause (toggle back)
+        time.sleep(actionconfig.MINIMUM_WAITTIME)  # 20ms — let game register pause
 
     # Finally, do the action — game is paused at exactly target_frame.
     # Find the avatar position
@@ -220,11 +221,12 @@ def perform_select(
     # Note: Pause invariant: Here the game is paused
     # and also, we have selected the target operator to be under bullet time
     # Now, proceed frame by frame until we reach the target time.
-    # Each pause/esc cycle advances the game by exactly one frame (~8 ms).
+    # Each pause/esc cycle advances the game by exactly one frame.
     while get_game_time() < target_frame:
         pause()                          # unpause (toggle)
         wait_for_game_time_update(timeout=0.05)  # wait for next frame
         esc()                            # pause (toggle back)
+        time.sleep(actionconfig.MINIMUM_WAITTIME)  # 20ms — let game register pause
 
     # Check if we are on time
     actual_frame = get_game_time()
