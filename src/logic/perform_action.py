@@ -1,12 +1,17 @@
 import time
 from typing import Callable
 
+import cv2
+
 from src.logger import logger
+from src.cache import get_avatars
 from src.config import GameRatioConfig as ratioconfig
+from src.config import ImageProcessingConfig as imgconfig
 from src.config import PerformActionConfig as actionconfig
 from src.logic.action import Action, ActionType, DirectionType
 from src.logic.locate_avatar import locate_avatar
 from src.logic.analyze_time import get_game_time, wait_for_game_time_update
+from src.mumu.mumu_vision import capture_game_window
 from src.mumu.mumu_controller import (
     pause,
     mouseclick,
@@ -78,6 +83,44 @@ def _end_drag(end: tuple[float, float]) -> None:
     """Release the held mouse button."""
     mouseup(end)
     time.sleep(actionconfig.MINIMUM_WAITTIME)
+
+
+def _deploy_avatar_match_info(action: Action) -> tuple[float, float | None]:
+    """Return best deploy-bar avatar match score and full-screen y center."""
+    if not action.oper:
+        return 0.0, None
+    oper_area_img = capture_game_window(ratioconfig.OPERATOR_AREA_RATIO)
+    best = 0.0
+    best_y: float | None = None
+    for avatar in get_avatars(action.oper):
+        matched = cv2.matchTemplate(oper_area_img, avatar, cv2.TM_CCOEFF_NORMED)
+        _, val, _, pos = cv2.minMaxLoc(matched)
+        if float(val) > best:
+            best = float(val)
+            best_y = (
+                ratioconfig.OPERATOR_AREA_RATIO[1]
+                + (pos[1] + avatar.shape[0] / 2) / imgconfig.SCREEN_STANDARD_SIZE[1]
+            )
+    return best, best_y
+
+
+def _deploy_placement_succeeded(action: Action) -> bool:
+    """A successful placement either removes or raises the operator card."""
+    time.sleep(actionconfig.MINIMUM_WAITTIME)
+    try:
+        score, avatar_y = _deploy_avatar_match_info(action)
+    except Exception:
+        logger.debug("failed to verify deploy placement", exc_info=True)
+        return True
+    succeeded = (
+        score < imgconfig.TEMPLATE_MATCH_THRESHOLD
+        or (avatar_y is not None and avatar_y < ratioconfig.OPERATOR_SELECTED_RATIO)
+    )
+    logger.debug(
+        f"Deploy placement check for {action.oper}: "
+        f"avatar_score={score:.3f}, avatar_y={avatar_y}, succeeded={succeeded}"
+    )
+    return succeeded
 
 
 def wait_until_threshold(
@@ -201,13 +244,32 @@ def perform_deploy(
     current_drag_pos = action.avatar_pos
     dragging = False
     try:
-        _begin_drag(action.avatar_pos)
-        dragging = True
-        _move_drag(action.avatar_pos, deploy_pos, via=middle_pos)
-        current_drag_pos = deploy_pos
+        placement_attempt = 0
+        while True:
+            if user_paused():
+                raise UserPausedError()
 
-        if dir_pos is not None:
-            _wait_running_until(direction_frame, user_paused)
+            if placement_attempt > 0:
+                wait_for_game_time_update(timeout=0.05)
+                locate_avatar(action)
+                middle_pos = (
+                    action.avatar_pos[0],
+                    action.avatar_pos[1] - ratioconfig.DEPLOY_DRAG_RATIO,
+                )
+                logger.debug(
+                    f"Retrying deploy placement for {action.oper} "
+                    f"(attempt {placement_attempt + 1})"
+                )
+
+            _begin_drag(action.avatar_pos)
+            dragging = True
+            _move_drag(action.avatar_pos, deploy_pos, via=middle_pos)
+            current_drag_pos = deploy_pos
+
+            if placement_attempt == 0:
+                first_release_frame = direction_frame if dir_pos is not None else target_frame
+                _wait_running_until(first_release_frame, user_paused)
+
             logger.debug(
                 f"Releasing deploy placement for {action.oper} at frame "
                 f"{get_game_time()} pos={current_drag_pos}"
@@ -215,6 +277,16 @@ def perform_deploy(
             _end_drag(current_drag_pos)
             dragging = False
 
+            if _deploy_placement_succeeded(action):
+                break
+
+            placement_attempt += 1
+            logger.warning(
+                f"Deploy placement for {action.oper} was not accepted; "
+                f"retrying drag (attempt {placement_attempt + 1})"
+            )
+
+        if dir_pos is not None:
             _begin_drag(direction_start_pos)
             dragging = True
             current_drag_pos = direction_start_pos
