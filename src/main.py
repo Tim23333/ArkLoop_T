@@ -56,8 +56,6 @@ def _run_excel(xlsm_file: str, debug: bool, autoenter: bool):
         wait_time1 = excel.get_setting('wait_time1')
         wait_time2 = excel.get_setting('wait_time2')
         wait_time3 = excel.get_setting('wait_time3')
-        bullet_threshold = excel.get_setting('bullet_threshold')
-        frame_threshold = excel.get_setting('frame_threshold')
 
         # Game time now comes from the WS time source (external game-memory
         # reader). Start
@@ -78,13 +76,6 @@ def _run_excel(xlsm_file: str, debug: bool, autoenter: bool):
         if wait_time3 is not None:
             actionconfig.GENERAL_WAITTIME = wait_time3
             logger.debug(f"Set general wait time to {actionconfig.GENERAL_WAITTIME}")
-        if bullet_threshold is not None:
-            actionconfig.BULLET_THRESHOLD = bullet_threshold
-            logger.debug(f"Set bullet threshold to {actionconfig.BULLET_THRESHOLD}")
-        if frame_threshold is not None:
-            actionconfig.FRAME_THRESHOLD = frame_threshold
-            logger.debug(f"Set frame threshold to {actionconfig.FRAME_THRESHOLD}")
-
         if map_name is not None:
             map_data = get_map_by_name(map_name)
         elif map_code is not None:

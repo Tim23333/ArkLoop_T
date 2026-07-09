@@ -284,8 +284,6 @@ export default function App() {
           wait_time1: 0.02,
           wait_time2: 0.1,
           wait_time3: 0.3,
-          bullet_threshold: 15.0,
-          frame_threshold: 2.0,
           devices: devices.length > 0 ? devices : undefined,
         }
         await saveTimeline(name, [], settings)

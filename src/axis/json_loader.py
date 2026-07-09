@@ -10,7 +10,6 @@ __all__ = ["load_axis_from_json"]
 # Map Chinese action/direction strings from Excel to enums
 _ACTION_TYPE_MAP = {
     "部署": ActionType.DEPLOY,
-    "选中": ActionType.SELECT,
     "技能": ActionType.SKILL,
     "撤退": ActionType.RETREAT,
 }
@@ -31,8 +30,6 @@ _SETTING_KEYS = {
     "wait_time1",
     "wait_time2",
     "wait_time3",
-    "bullet_threshold",
-    "frame_threshold",
     "breakpoints",
 }
 

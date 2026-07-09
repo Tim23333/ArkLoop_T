@@ -146,16 +146,6 @@ class AxisRunner:
             actionconfig.GENERAL_WAITTIME = wait_time3
             logger.debug(f"Set general wait time to {actionconfig.GENERAL_WAITTIME}")
 
-        bullet_threshold = self.settings.get("bullet_threshold")
-        if bullet_threshold is not None:
-            actionconfig.BULLET_THRESHOLD = bullet_threshold
-            logger.debug(f"Set bullet threshold to {actionconfig.BULLET_THRESHOLD}")
-
-        frame_threshold = self.settings.get("frame_threshold")
-        if frame_threshold is not None:
-            actionconfig.FRAME_THRESHOLD = frame_threshold
-            logger.debug(f"Set frame threshold to {actionconfig.FRAME_THRESHOLD}")
-
     def _load_map(self):
         """Load map data from settings."""
         map_name = self.settings.get("map_name")
@@ -181,10 +171,6 @@ class AxisRunner:
             self._runner_state["selected_oper"] = None
             self._runner_state["current_view"] = False
             self._runner_state["pending_deploy"] = None
-        elif action.action_type == ActionType.SELECT:
-            self._runner_state["selected_oper"] = action.oper
-            self._runner_state["current_view"] = True
-            self._runner_state["side_source"] = None
         elif action.action_type == ActionType.SKILL:
             self._runner_state["selected_oper"] = None
             self._runner_state["current_view"] = False
@@ -333,7 +319,7 @@ class AxisRunner:
 
                 # Skip actions whose scheduled time has already passed.
                 current_frame = get_game_time()
-                if current_frame > target_frame + actionconfig.FRAME_THRESHOLD:
+                if current_frame > target_frame + actionconfig.LATE_SKIP_TOLERANCE_FRAMES:
                     logger.warning(
                         f"Skipping action {action} because its scheduled time has passed "
                         f"(current={current_frame}, target={target_frame})"

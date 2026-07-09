@@ -1,19 +1,13 @@
 import time
 from typing import Callable
 
-import cv2
-
 from src.logger import logger
-from src.cache import get_avatars
 from src.config import GameRatioConfig as ratioconfig
-from src.config import ImageProcessingConfig as imgconfig
 from src.config import PerformActionConfig as actionconfig
 from src.logic.action import Action, ActionType, DirectionType
 from src.logic.locate_avatar import locate_avatar
 from src.logic.analyze_time import get_game_time, wait_for_game_time_update
-from src.mumu.mumu_vision import capture_game_window
 from src.mumu.mumu_controller import (
-    pause,
     mouseclick,
     mousedown,
     mouseup,
@@ -37,6 +31,10 @@ class PerformLateError(Exception):
 
 
 class UserPausedError(Exception):
+    pass
+
+
+class PrecisePauseError(Exception):
     pass
 
 
@@ -85,223 +83,186 @@ def _end_drag(end: tuple[float, float]) -> None:
     time.sleep(actionconfig.MINIMUM_WAITTIME)
 
 
-def _deploy_avatar_match_info(action: Action) -> tuple[float, float | None]:
-    """Return best deploy-bar avatar match score and full-screen y center."""
-    if not action.oper:
-        return 0.0, None
-    oper_area_img = capture_game_window(ratioconfig.OPERATOR_AREA_RATIO)
-    best = 0.0
-    best_y: float | None = None
-    for avatar in get_avatars(action.oper):
-        matched = cv2.matchTemplate(oper_area_img, avatar, cv2.TM_CCOEFF_NORMED)
-        _, val, _, pos = cv2.minMaxLoc(matched)
-        if float(val) > best:
-            best = float(val)
-            best_y = (
-                ratioconfig.OPERATOR_AREA_RATIO[1]
-                + (pos[1] + avatar.shape[0] / 2) / imgconfig.SCREEN_STANDARD_SIZE[1]
+def _toggle_game_pause(settle: bool = False) -> None:
+    """Toggle the in-game pause/play button without sending ESC."""
+    mouseclick(ratioconfig.PAUSE_BUTTON_RATIO)
+    if settle:
+        time.sleep(
+            float(
+                getattr(
+                    actionconfig,
+                    "PAUSE_TOGGLE_SETTLE",
+                    actionconfig.MINIMUM_WAITTIME,
+                )
             )
-    return best, best_y
+        )
 
 
-def _deploy_placement_succeeded(action: Action) -> bool:
-    """A successful placement either removes or raises the operator card."""
-    time.sleep(actionconfig.MINIMUM_WAITTIME)
-    try:
-        score, avatar_y = _deploy_avatar_match_info(action)
-    except Exception:
-        logger.debug("failed to verify deploy placement", exc_info=True)
+def _frame_stable_for(duration: float, user_paused: Callable[[], bool]) -> bool:
+    """Return True when the frame counter does not advance for ``duration``."""
+    duration = max(0.0, float(duration))
+    if duration <= 0:
         return True
-    succeeded = (
-        score < imgconfig.TEMPLATE_MATCH_THRESHOLD
-        or (avatar_y is not None and avatar_y < ratioconfig.OPERATOR_SELECTED_RATIO)
-    )
-    logger.debug(
-        f"Deploy placement check for {action.oper}: "
-        f"avatar_score={score:.3f}, avatar_y={avatar_y}, succeeded={succeeded}"
-    )
-    return succeeded
 
-
-def wait_until_threshold(
-    target_frame: int, threshold: int, user_paused: Callable[[], bool]
-) -> None:
-    while get_game_time() + threshold < target_frame:
-        if user_paused():
-            pause()
-            raise UserPausedError()
-        # Block until the WS feed delivers a new frame instead of busy-polling.
-        wait_for_game_time_update(timeout=0.01)
-
-
-def _step_paused_until(target_frame: int, user_paused: Callable[[], bool]) -> None:
-    """Frame-step a paused game until ``target_frame`` is reached."""
-    while get_game_time() < target_frame:
+    start_frame = get_game_time()
+    deadline = time.perf_counter() + duration
+    while time.perf_counter() < deadline:
         if user_paused():
             raise UserPausedError()
-        pause()
-        wait_for_game_time_update(timeout=0.05)
-        pause()
-        time.sleep(actionconfig.MINIMUM_WAITTIME)
+        remaining = max(0.0, deadline - time.perf_counter())
+        wait_for_game_time_update(timeout=min(0.01, remaining))
+        current_frame = get_game_time()
+        if current_frame != start_frame:
+            logger.debug(
+                f"pause verification saw frame advance "
+                f"{start_frame}->{current_frame}"
+            )
+            return False
+    return True
+
+
+def _ensure_game_paused(user_paused: Callable[[], bool], label: str) -> None:
+    """Verify pause state by checking that the frame counter is stable."""
+    stable_time = float(
+        getattr(actionconfig, "PAUSE_VERIFY_STABLE_TIME", 0.06)
+    )
+    retries = max(1, int(getattr(actionconfig, "PAUSE_VERIFY_RETRIES", 3)))
+
+    for attempt in range(retries):
+        if _frame_stable_for(stable_time, user_paused):
+            return
+        logger.warning(
+            f"Game still advancing during {label}; "
+            f"retrying pause ({attempt + 1}/{retries})"
+        )
+        _toggle_game_pause(settle=True)
+
+    if _frame_stable_for(stable_time, user_paused):
+        return
+    raise PrecisePauseError(f"Unable to verify game pause before {label}")
 
 
 def _wait_running_until(target_frame: int, user_paused: Callable[[], bool]) -> None:
     """Wait while the game is running until ``target_frame`` is reached."""
     while get_game_time() < target_frame:
         if user_paused():
-            pause()
             raise UserPausedError()
         wait_for_game_time_update(timeout=0.01)
 
 
-def _ensure_running(timeout: float = 0.5) -> None:
-    """Verify the game is running (frame advancing). If not, toggle pause."""
-    f1 = get_game_time()
-    time.sleep(0.05)
-    f2 = get_game_time()
-    if f2 > f1:
-        return  # already running
-    logger.warning(f"Game appears paused (frame {f1}->{f2}), toggling pause")
-    pause()
-    time.sleep(actionconfig.MINIMUM_WAITTIME)
+def _frame_step_paused_until(target_frame: int, user_paused: Callable[[], bool]) -> None:
+    """While paused, briefly resume every 8ms until the target frame arrives."""
+    interval = float(getattr(actionconfig, "FRAME_STEP_INTERVAL", 0.008))
+    while get_game_time() < target_frame:
+        if user_paused():
+            raise UserPausedError()
+        _toggle_game_pause()
+        time.sleep(interval)
+        _toggle_game_pause(settle=True)
+        wait_for_game_time_update(timeout=interval)
+    _ensure_game_paused(user_paused, "target-frame action")
+
+
+def _enter_precise_pause(
+    target_frame: int,
+    focus_pos: tuple[float, float] | None,
+    user_paused: Callable[[], bool],
+    on_pause_entered: Callable[[], None] | None = None,
+) -> None:
+    """Enter bullet-time, pause near target, then frame-step to target."""
+    bullet_frames = int(getattr(actionconfig, "BULLET_TIME_FRAMES", 30))
+    pause_frames = int(getattr(actionconfig, "PRECISE_PAUSE_FRAMES", 10))
+    bullet_frame = max(0, target_frame - bullet_frames)
+    pause_frame = max(bullet_frame, target_frame - pause_frames)
+
+    _wait_running_until(bullet_frame, user_paused)
+    if focus_pos is not None:
+        mouseclick(focus_pos)
+        time.sleep(actionconfig.MINIMUM_WAITTIME)
+
+    _wait_running_until(pause_frame, user_paused)
+    _toggle_game_pause(settle=True)
+    _ensure_game_paused(user_paused, "precise-pause entry")
+    if on_pause_entered is not None:
+        on_pause_entered()
+    _frame_step_paused_until(target_frame, user_paused)
+
+
+def _resume_precise_pause(precise_paused: bool, label: str) -> None:
+    if not precise_paused:
+        return
+    try:
+        _toggle_game_pause(settle=True)
+    except Exception:
+        logger.debug(f"failed to resume after {label}", exc_info=True)
+
+
+def _direction_end_pos(action: Action) -> tuple[float, float] | None:
+    if action.direction == DirectionType.LEFT:
+        return (
+            max(0, action.view_pos_side[0] - ratioconfig.DIRECTION_RATIO),
+            action.view_pos_side[1],
+        )
+    if action.direction == DirectionType.RIGHT:
+        return (
+            min(1, action.view_pos_side[0] + ratioconfig.DIRECTION_RATIO),
+            action.view_pos_side[1],
+        )
+    if action.direction == DirectionType.UP:
+        return (
+            action.view_pos_side[0],
+            max(0, action.view_pos_side[1] - ratioconfig.DIRECTION_RATIO),
+        )
+    if action.direction == DirectionType.DOWN:
+        return (
+            action.view_pos_side[0],
+            min(1, action.view_pos_side[1] + ratioconfig.DIRECTION_RATIO),
+        )
+    return None
 
 
 def perform_deploy(
     action: Action,
-    user_paused: Callable[[], bool],
-    BULLET_THRESHOLD: int,
-    FRAME_THRESHOLD: int,
-) -> int:
-    target_frame = action.get_game_time()
-    prepare_frames = int(getattr(actionconfig, "DEPLOY_PREPARE_FRAMES", 60))
-    direction_frames = int(getattr(actionconfig, "DEPLOY_DIRECTION_FRAMES", 30))
-    prepare_frame = max(0, target_frame - prepare_frames)
-    direction_frame = max(prepare_frame, target_frame - direction_frames)
-
-    # ── Step 1: Resume game and wait until near prepare_frame ──
-    # The game must be running before we can locate avatars in the deploy bar.
-    actual_frame = get_game_time()
-    if actual_frame < prepare_frame:
-        logger.debug(f"Resuming game (frame {actual_frame}, prepare at {prepare_frame})")
-        _ensure_running()
-        _wait_running_until(prepare_frame, user_paused)
-
-    # ── Step 2: Locate avatar and prepare drag ──
-    time.sleep(actionconfig.MINIMUM_WAITTIME)
-
-    # Find the avatar position from the deploy bar without changing pause state.
-    locate_avatar(action)
-
-    # Check if we have actually already selected the operator
-    if action.avatar_pos[1] < ratioconfig.OPERATOR_SELECTED_RATIO:
-        logger.debug(f"Operator {action.oper} is already selected")
-    else:
-        mouseclick(action.avatar_pos)
-        time.sleep(actionconfig.MINIMUM_WAITTIME)
-        locate_avatar(action)
-
-    # Calculate positions
-    middle_pos = (
-        action.avatar_pos[0],
-        action.avatar_pos[1] - ratioconfig.DEPLOY_DRAG_RATIO,
-    )
-    deploy_pos = (
-        action.view_pos_side[0],
-        action.view_pos_side[1] + ratioconfig.DEPLOY_DELTA_RATIO,
-    )
-    direction_start_pos = action.view_pos_side
-
-    # Set the direction
-    dir_pos = None
-    if action.direction == DirectionType.LEFT:
-        dir_pos = (
-            max(0, action.view_pos_side[0] - ratioconfig.DIRECTION_RATIO),
-            action.view_pos_side[1],
-        )
-    elif action.direction == DirectionType.RIGHT:
-        dir_pos = (
-            min(1, action.view_pos_side[0] + ratioconfig.DIRECTION_RATIO),
-            action.view_pos_side[1],
-        )
-    elif action.direction == DirectionType.UP:
-        dir_pos = (
-            action.view_pos_side[0],
-            max(0, action.view_pos_side[1] - ratioconfig.DIRECTION_RATIO),
-        )
-    elif action.direction == DirectionType.DOWN:
-        dir_pos = (
-            action.view_pos_side[0],
-            min(1, action.view_pos_side[1] + ratioconfig.DIRECTION_RATIO),
-        )
-
-    logger.debug(
-        f"Deploy drag plan for {action.oper}: avatar={action.avatar_pos}, "
-        f"deploy={deploy_pos}, direction_start={direction_start_pos}, "
-        f"direction_end={dir_pos}, direction_frame={direction_frame}, target={target_frame}"
-    )
-
-    # ── Step 3: Start drag, wait, release at target_frame ──
+) -> None:
+    """Deploy an operator. The game must already be paused at target frame."""
     current_drag_pos = action.avatar_pos
     dragging = False
+
     try:
-        placement_attempt = 0
-        while True:
-            if user_paused():
-                raise UserPausedError()
+        locate_avatar(action)
+        if action.avatar_pos[1] >= ratioconfig.OPERATOR_SELECTED_RATIO:
+            mouseclick(action.avatar_pos)
+            time.sleep(actionconfig.MINIMUM_WAITTIME)
+            locate_avatar(action)
 
-            if placement_attempt > 0:
-                wait_for_game_time_update(timeout=0.05)
-                locate_avatar(action)
-                middle_pos = (
-                    action.avatar_pos[0],
-                    action.avatar_pos[1] - ratioconfig.DEPLOY_DRAG_RATIO,
-                )
-                logger.debug(
-                    f"Retrying deploy placement for {action.oper} "
-                    f"(attempt {placement_attempt + 1})"
-                )
+        middle_pos = (
+            action.avatar_pos[0],
+            action.avatar_pos[1] - ratioconfig.DEPLOY_DRAG_RATIO,
+        )
+        deploy_pos = (
+            action.view_pos_side[0],
+            action.view_pos_side[1] + ratioconfig.DEPLOY_DELTA_RATIO,
+        )
 
-            _begin_drag(action.avatar_pos)
-            dragging = True
-            _move_drag(action.avatar_pos, deploy_pos, via=middle_pos)
-            current_drag_pos = deploy_pos
-
-            if placement_attempt == 0:
-                first_release_frame = direction_frame if dir_pos is not None else target_frame
-                _wait_running_until(first_release_frame, user_paused)
-
-            logger.debug(
-                f"Releasing deploy placement for {action.oper} at frame "
-                f"{get_game_time()} pos={current_drag_pos}"
-            )
-            _end_drag(current_drag_pos)
-            dragging = False
-
-            if _deploy_placement_succeeded(action):
-                break
-
-            placement_attempt += 1
-            logger.warning(
-                f"Deploy placement for {action.oper} was not accepted; "
-                f"retrying drag (attempt {placement_attempt + 1})"
-            )
-
-        if dir_pos is not None:
-            _begin_drag(direction_start_pos)
-            dragging = True
-            current_drag_pos = direction_start_pos
-            _move_drag(direction_start_pos, dir_pos)
-            current_drag_pos = dir_pos
-
-        _wait_running_until(target_frame, user_paused)
-        if dir_pos is not None:
-            logger.debug(
-                f"Releasing deploy direction for {action.oper} at frame "
-                f"{get_game_time()} pos={current_drag_pos}"
-            )
+        _begin_drag(action.avatar_pos)
+        dragging = True
+        _move_drag(action.avatar_pos, deploy_pos, via=middle_pos)
+        current_drag_pos = deploy_pos
         _end_drag(current_drag_pos)
         dragging = False
-        actual_frame = get_game_time()
+
+        dir_pos = _direction_end_pos(action)
+        if dir_pos is not None:
+            time.sleep(
+                float(
+                    getattr(
+                        actionconfig,
+                        "DEPLOY_TO_DIRECTION_WAIT",
+                        actionconfig.MINIMUM_WAITTIME,
+                    )
+                )
+            )
+            _drag_mouse(action.view_pos_side, dir_pos)
     finally:
         if dragging:
             try:
@@ -309,128 +270,63 @@ def perform_deploy(
             except Exception:
                 logger.debug("failed to release mouse after deploy error", exc_info=True)
 
-    return actual_frame
+
+def perform_skill(action: Action) -> None:
+    """Use skill. The game must already be paused at target frame."""
+    mouseclick(ratioconfig.SKILL_RATIO)
+    time.sleep(actionconfig.MINIMUM_WAITTIME)
 
 
-def perform_select(
-    action: Action,
-    user_paused: Callable[[], bool],
-    BULLET_THRESHOLD: int,
-    FRAME_THRESHOLD: int,
-) -> int:
-    """Select a deployed operator (enter side view) at the action time."""
-    target_frame = action.get_game_time()
-    # Note: Pause invariant: Here the game is paused
-    # First, Proceed until we reach the bullet threshold
-    if get_game_time() + BULLET_THRESHOLD < target_frame:
-        # When we have too much time, first resume, then enter bullet time when appropriate
-        logger.debug(f"Too much time, resuming and entering bullet time")
-        _ensure_running()
-        wait_until_threshold(target_frame, BULLET_THRESHOLD, user_paused)
-        mouseclick(action.view_pos_front)
-        time.sleep(actionconfig.GENERAL_WAITTIME)
-        wait_until_threshold(target_frame, FRAME_THRESHOLD, user_paused)
-        pause()
-        time.sleep(actionconfig.GENERAL_WAITTIME)
-    elif get_game_time() + FRAME_THRESHOLD < target_frame:
-        # When we are within the bullet threshold, resume and enter bullet time, quickly
-        logger.debug(f"Within bullet threshold, entering bullet time")
-        _ensure_running()
-        mouseclick(action.view_pos_front)
-        time.sleep(actionconfig.GENERAL_WAITTIME)
-        wait_until_threshold(target_frame, FRAME_THRESHOLD, user_paused)
-        pause()
-        time.sleep(actionconfig.GENERAL_WAITTIME)
-    else:
-        # When we are already within the frame threshold, enter side view first, then try to click
-        # Note: Here the click may fail, since it is not guaranteed that the operator can be selected from side view
-        # Ex. the leftmost deployable position in the middle row of 1-7
-        logger.debug(f"Within frame threshold, entering side view")
-        mouseclick(ratioconfig.LAST_OPER_RATIO)
-        time.sleep(actionconfig.GENERAL_WAITTIME)
-        _ensure_running()
-        mouseclick(action.view_pos_side)
-        time.sleep(actionconfig.MINIMUM_WAITTIME)
-        pause()
-        time.sleep(actionconfig.GENERAL_WAITTIME)
-
-    # Note: Pause invariant: Here the game is paused
-    # and also, we have selected the target operator to be under bullet time
-    # Now, proceed frame by frame until we reach the target time.
-    # Verify pause state first.
-    for _ in range(5):
-        f1 = get_game_time()
-        time.sleep(0.03)
-        f2 = get_game_time()
-        if f2 <= f1:
-            break
-        pause()
-        time.sleep(actionconfig.MINIMUM_WAITTIME)
-
-    while get_game_time() < target_frame:
-        pause()                          # unpause
-        wait_for_game_time_update(timeout=0.05)  # wait for next frame
-        pause()                          # re-pause
-        time.sleep(actionconfig.MINIMUM_WAITTIME)  # 20ms — let game register pause
-
-    # Check if we are on time
-    actual_frame = get_game_time()
-    if actual_frame != target_frame:
-        logger.warning(
-            f"Game time mismatch, performed action at frame {actual_frame} "
-            f"instead of frame {target_frame}"
-        )
-
-    return actual_frame
+def perform_retreat(action: Action) -> None:
+    """Retreat an operator. The game must already be paused at target frame."""
+    mouseclick(ratioconfig.RETREAT_RATIO)
+    time.sleep(actionconfig.MINIMUM_WAITTIME)
 
 
-def perform_skill_or_retreat(
-    action: Action,
-    user_paused: Callable[[], bool],
-    BULLET_THRESHOLD: int,
-    FRAME_THRESHOLD: int,
-) -> int:
-    """Use skill or retreat an already-selected operator."""
-    actual_frame = perform_select(action, user_paused, BULLET_THRESHOLD, FRAME_THRESHOLD)
-
-    # Final check if user paused
-    if user_paused():
-        raise UserPausedError()
-
-    # Finally, do the action (game is paused — click works in pause mode)
-    if action.action_type == ActionType.SKILL:
-        mouseclick(ratioconfig.SKILL_RATIO)
-        time.sleep(actionconfig.GENERAL_WAITTIME)
-    elif action.action_type == ActionType.RETREAT:
-        mouseclick(ratioconfig.RETREAT_RATIO)
-        time.sleep(actionconfig.GENERAL_WAITTIME)
-    else:
-        raise ValueError(f"Invalid action type: {action.action_type}")
-
-    # Note: Pause invariant: Here the game is paused
-    return actual_frame
+def _preselect_pos(action: Action) -> tuple[float, float]:
+    if action.action_type == ActionType.DEPLOY:
+        return ratioconfig.LAST_OPER_RATIO
+    if action.action_type in (ActionType.SKILL, ActionType.RETREAT):
+        if action.view_pos_front is None:
+            raise ValueError(f"Missing front-view position for {action.action_type}")
+        return action.view_pos_front
+    raise ValueError(f"Unsupported playback action type: {action.action_type}")
 
 
 def perform_action(action: Action, user_paused: Callable[[], bool]) -> None:
     logger.debug(f"Performing action: {action}")
 
-    BULLET_THRESHOLD = actionconfig.BULLET_THRESHOLD
-    FRAME_THRESHOLD = actionconfig.FRAME_THRESHOLD
-
     target_frame = action.get_game_time()
-    if action.action_type == ActionType.DEPLOY:
-        actual_frame = perform_deploy(action, user_paused, BULLET_THRESHOLD, FRAME_THRESHOLD)
-    elif action.action_type == ActionType.SELECT:
-        actual_frame = perform_select(action, user_paused, BULLET_THRESHOLD, FRAME_THRESHOLD)
-    elif (
-        action.action_type == ActionType.SKILL
-        or action.action_type == ActionType.RETREAT
-    ):
-        actual_frame = perform_skill_or_retreat(
-            action, user_paused, BULLET_THRESHOLD, FRAME_THRESHOLD
+    precise_paused = False
+    action_completed = False
+
+    def mark_precise_paused() -> None:
+        nonlocal precise_paused
+        precise_paused = True
+
+    try:
+        _enter_precise_pause(
+            target_frame,
+            _preselect_pos(action),
+            user_paused,
+            mark_precise_paused,
         )
-    else:
-        raise ValueError(f"Invalid action type: {action.action_type}")
+        if user_paused():
+            raise UserPausedError()
+
+        if action.action_type == ActionType.DEPLOY:
+            perform_deploy(action)
+        elif action.action_type == ActionType.SKILL:
+            perform_skill(action)
+        elif action.action_type == ActionType.RETREAT:
+            perform_retreat(action)
+        else:
+            raise ValueError(f"Unsupported playback action type: {action.action_type}")
+
+        actual_frame = get_game_time()
+        action_completed = True
+    finally:
+        _resume_precise_pause(precise_paused and action_completed, "action")
 
     if actual_frame == target_frame:
         logger.info(f"Performed action: {action}")

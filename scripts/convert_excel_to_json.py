@@ -21,7 +21,6 @@ from src.logic.action import ActionType, DirectionType
 
 _ACTION_TYPE_REVERSE = {
     ActionType.DEPLOY: "部署",
-    ActionType.SELECT: "选中",
     ActionType.SKILL: "技能",
     ActionType.RETREAT: "撤退",
 }
@@ -41,8 +40,6 @@ _SETTING_NAMES = [
     "wait_time1",
     "wait_time2",
     "wait_time3",
-    "bullet_threshold",
-    "frame_threshold",
 ]
 
 
@@ -82,7 +79,8 @@ def convert_excel_to_json(xlsm_path: str, json_path: str = None):
         action = excel.get_current_action()
         if not action.is_valid():
             break
-        actions.append(action_to_dict(action))
+        if action.action_type != ActionType.SELECT:
+            actions.append(action_to_dict(action))
         excel.next_action()
 
     output = {

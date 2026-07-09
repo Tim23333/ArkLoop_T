@@ -13,8 +13,6 @@ export interface TimelineSettings {
   wait_time1?: number
   wait_time2?: number
   wait_time3?: number
-  bullet_threshold?: number
-  frame_threshold?: number
   breakpoints?: number[]
   devices?: MapDevice[]
 }

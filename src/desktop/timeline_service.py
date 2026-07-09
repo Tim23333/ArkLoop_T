@@ -12,6 +12,9 @@ import webview
 from src.logger import logger
 
 
+_LEGACY_TIMING_SETTING_KEYS = {"bullet_threshold", "frame_threshold"}
+
+
 class TimelineService:
     """Timeline file, preset, pin, import, and export operations."""
 
@@ -33,6 +36,24 @@ class TimelineService:
     def _inside_timelines(self, path: Path) -> bool:
         return path.parent.resolve() == self.timelines_dir.resolve()
 
+    def _sanitize_settings(self, settings: Any) -> Dict[str, Any]:
+        if not isinstance(settings, dict):
+            return {}
+        return {
+            key: value
+            for key, value in settings.items()
+            if key not in _LEGACY_TIMING_SETTING_KEYS
+        }
+
+    def _sanitize_timeline_data(self, data: Any) -> Dict[str, Any]:
+        if not isinstance(data, dict):
+            return {"settings": {}, "actions": []}
+        next_data = dict(data)
+        next_data["settings"] = self._sanitize_settings(next_data.get("settings", {}))
+        if not isinstance(next_data.get("actions"), list):
+            next_data["actions"] = []
+        return next_data
+
     def create_timeline(self) -> str:
         self.timelines_dir.mkdir(parents=True, exist_ok=True)
         stem = f"timeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -52,7 +73,15 @@ class TimelineService:
         try:
             self.timelines_dir.mkdir(parents=True, exist_ok=True)
             with open(self.timelines_dir / self._safe_name(name), "w", encoding="utf-8") as f:
-                json.dump({"settings": settings, "actions": actions}, f, ensure_ascii=False, indent=2)
+                json.dump(
+                    {
+                        "settings": self._sanitize_settings(settings),
+                        "actions": actions,
+                    },
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
             return True
         except Exception as exc:
             logger.exception(f"Failed to save timeline {name}: {exc}")
@@ -84,7 +113,7 @@ class TimelineService:
                     break
                 n += 1
             with open(src, "r", encoding="utf-8") as f:
-                data = json.load(f)
+                data = self._sanitize_timeline_data(json.load(f))
             with open(candidate, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             return candidate.name
@@ -123,10 +152,10 @@ class TimelineService:
                 return False
             target = result if isinstance(result, str) else result[0]
             with open(src, "r", encoding="utf-8") as f:
-                data = f.read()
+                data = self._sanitize_timeline_data(json.load(f))
             Path(target).parent.mkdir(parents=True, exist_ok=True)
             with open(target, "w", encoding="utf-8", newline="\n") as f:
-                f.write(data)
+                json.dump(data, f, ensure_ascii=False, indent=2)
             return True
         except Exception as exc:
             logger.exception(f"export_timeline failed: {exc}")
@@ -146,6 +175,7 @@ class TimelineService:
             if not isinstance(data, dict) or "actions" not in data:
                 logger.warning(f"import_timeline: not a valid timeline JSON: {src}")
                 return ""
+            data = self._sanitize_timeline_data(data)
             name = os.path.basename(src)
             if not name.endswith(".json"):
                 name += ".json"
@@ -173,7 +203,7 @@ class TimelineService:
                     if isinstance(entry, dict) and "name" in entry:
                         result.append({
                             "name": str(entry["name"]),
-                            "settings": entry.get("settings", {}) or {},
+                            "settings": self._sanitize_settings(entry.get("settings", {})),
                         })
                 return result
         except Exception as exc:
@@ -192,7 +222,7 @@ class TimelineService:
                     data = json.load(f)
             presets = data.get("presets", []) or []
             presets = [p for p in presets if not (isinstance(p, dict) and p.get("name") == clean)]
-            presets.append({"name": clean, "settings": settings or {}})
+            presets.append({"name": clean, "settings": self._sanitize_settings(settings)})
             data["presets"] = presets
             with open(self.meta_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -261,7 +291,7 @@ class TimelineService:
             if not self._inside_timelines(path) or not path.is_file():
                 return False
             with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+                data = self._sanitize_timeline_data(json.load(f))
             existing = data.get("actions", [])
             existing.extend(new_actions or [])
             data["actions"] = existing
@@ -278,8 +308,8 @@ class TimelineService:
             if not self._inside_timelines(path) or not path.is_file():
                 return False
             with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            settings = data.get("settings", {}) or {}
+                data = self._sanitize_timeline_data(json.load(f))
+            settings = self._sanitize_settings(data.get("settings", {}) or {})
             settings["breakpoints"] = breakpoints or []
             data["settings"] = settings
             with open(path, "w", encoding="utf-8") as f:
@@ -295,7 +325,7 @@ class TimelineService:
             return {"settings": {}, "actions": []}
         try:
             with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+                data = self._sanitize_timeline_data(json.load(f))
             actions = data.get("actions", [])
             for action in actions:
                 if "cycle" not in action:
