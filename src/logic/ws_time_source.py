@@ -3,9 +3,7 @@
 Connects to an external service that reads the game's memory and pushes
 ``{game_time, frame_count, connected}`` over WebSocket.  ``frame_count`` is the
 absolute logical frame since the battle started (monotonic, resets per battle);
-it is decomposed into the existing ``GameTime(cycle, tick)`` model via
-``TICK_MAX`` so the rest of the timeline engine (axis runner, breakpoints,
-cycle-offset, perform_action) is unchanged.
+the playback engine consumes this absolute frame directly.
 
 This module owns a process-wide singleton started once at app startup and read
 by ``analyze_time.get_game_time()`` in both recording and playback.  The URL is

@@ -27,6 +27,9 @@ export interface BackendState {
   game_time_sec?: number
   ws_connected?: boolean
   ws_mem_ok?: boolean
+  playback_phase?: string
+  playback_target_frame?: number | null
+  playback_game_paused?: boolean
 }
 
 export interface OperatorInfo {

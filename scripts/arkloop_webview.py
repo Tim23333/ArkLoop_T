@@ -73,6 +73,7 @@ from src.desktop.config_service import ConfigService
 from src.desktop.resource_service import ResourceService
 from src.desktop.state_publisher import start_state_publisher
 from src.desktop.timeline_service import TimelineService
+from src.axis.playback_controller import PlaybackController, PlaybackInterrupted
 from src.logger import logger
 from src.logic.ws_time_source import DEFAULT_WS_URL, get_ws_time_source
 
@@ -98,14 +99,10 @@ class ArkLoopApi:
         self._cached_view_detector: Optional[Any] = None
         # Playback
         self._playback_thread: Optional[threading.Thread] = None
-        self._playback_stop = threading.Event()
+        self._playback_controller: Optional[PlaybackController] = None
         self._last_playback_frame: int = 0
         self._last_playback_state: Dict[str, Any] = {}
         self._mouse_debug = mouse_debug
-        # True when the most recent playback breakpoint left the game paused
-        # via the in-game pause toggle. Cleared on the next start_recording
-        # / start_playback so the game is resumed before fresh control starts.
-        self._game_paused_by_runner = False
 
     # ------------------------------------------------------------------
     # Recording lifecycle
@@ -123,17 +120,14 @@ class ArkLoopApi:
             if self.backend is not None:
                 return
 
-            # If the previous playback (or user click) paused the game,
-            # toggle pause again so recording observes a live game rather
-            # than a frozen menu overlay.
-            if self._game_paused_by_runner:
+            # A paused playback intentionally leaves the game paused. Resume
+            # through the same controller before starting a recording session.
+            if self._playback_controller is not None:
                 try:
-                    from src.mumu.mumu_controller import pause as game_pause
-                    game_pause()
-                    logger.info("[recording] dismissed pause menu from breakpoint")
+                    self._playback_controller.resume_for_new_session()
+                    logger.info("[recording] resumed game from previous playback pause")
                 except Exception as exc:
-                    logger.warning(f"Failed to dismiss pause menu: {exc}")
-                self._game_paused_by_runner = False
+                    logger.warning(f"Failed to resume previous playback pause: {exc}")
 
             self.backend = ActionBackend(
                 map_code=map_code,
@@ -383,9 +377,18 @@ class ArkLoopApi:
                 continue
 
         from src.axis.axis_runner import AxisRunner
-        self._playback_stop.clear()
-        self._game_paused_by_runner = False
         frame_offset_int = int(frame_offset or 0)
+
+        if self._playback_controller is not None:
+            try:
+                self._playback_controller.resume_for_new_session()
+            except Exception as exc:
+                logger.warning(f"Failed to prepare previous playback session: {exc}")
+
+        controller = PlaybackController(
+            state_callback=lambda state: self._push_event("playback_state", state)
+        )
+        self._playback_controller = controller
 
         # A fresh playback (no resume offset) starts from a clean slate so a
         # stale deployed set from a previous timeline/run can't leak in. A
@@ -402,32 +405,25 @@ class ArkLoopApi:
         def _run() -> None:
             runner = None
             try:
-                def _on_runner_pause(cycle: int, tick: int) -> None:
+                def _on_runner_pause(frame: int) -> None:
                     # Breakpoint fired — runner already paused the game.
-                    # Remember so the next start_recording knows to resume it.
-                    self._game_paused_by_runner = True
                     state = runner.get_state() if runner is not None else {}
                     logger.info(
-                        f"[playback] breakpoint pause cycle={cycle} tick={tick} "
+                        f"[playback] breakpoint pause frame={frame} "
                         f"state={state}"
                     )
                     self._push_event(
                         "paused",
-                        {"source": "playback", "cycle": cycle, "tick": tick, "state": state},
+                        {"source": "playback", "frame": frame, "state": state},
                     )
 
                 runner = AxisRunner(
                     actions=actions,
                     settings=_settings,
-                    # Wire stop_event into is_paused so the runner aborts
-                    # bullet-time / frame-step inner loops immediately on Stop,
-                    # not just at action boundaries.
-                    is_paused=self._playback_stop.is_set,
+                    # One controller owns stop, pause and frame-accurate action timing.
+                    playback_controller=controller,
                     autoenter=autoenter,
                     show_error=lambda msg: logger.error(f"Playback error: {msg}"),
-                    # tick_callback removed — game_time is pushed by the global
-                    # _state_publisher from the WS time source at 60 Hz.
-                    stop_event=self._playback_stop,
                     frame_offset=frame_offset_int,
                     breakpoints=bp_frames,
                     on_pause=_on_runner_pause,
@@ -451,7 +447,11 @@ class ArkLoopApi:
                 )
                 self._push_event(
                     "playback_done",
-                    {"frame": final_fc, "state": self._last_playback_state},
+                    {
+                        "frame": final_fc,
+                        "state": self._last_playback_state,
+                        "playback": controller.snapshot(),
+                    },
                 )
 
         self._playback_thread = threading.Thread(target=_run, daemon=True)
@@ -476,17 +476,43 @@ class ArkLoopApi:
         Pause passes ``reset_state=False`` so a subsequent resume can inherit
         the deployed set.
         """
-        self._playback_stop.set()
-        if self._playback_thread is not None:
-            self._playback_thread.join(timeout=2.0)
+        controller = self._playback_controller
+        if controller is not None:
+            controller.request_stop(source="ui_stop")
+        thread = self._playback_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=3.0)
+        if thread is not None and thread.is_alive():
+            logger.warning("Playback thread did not stop within 3 seconds")
+        else:
             self._playback_thread = None
-        if reset_state:
-            self.reset_playback_state()
+            if controller is not None and controller.stop_requested:
+                try:
+                    controller.check_interruption()
+                except PlaybackInterrupted:
+                    pass
+            if reset_state:
+                self.reset_playback_state()
 
     def pause_playback(self) -> Dict[str, Any]:
         """Stop playback and return the last known frame — frontend
         uses it to set frame_offset for resume. Emits 'paused' event too."""
-        self.stop_playback(reset_state=False)
+        controller = self._playback_controller
+        if controller is None:
+            return {"ok": False}
+        controller.request_pause(source="ui_pause")
+        thread = self._playback_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=3.0)
+        if thread is not None and thread.is_alive():
+            logger.warning("Playback thread did not pause within 3 seconds")
+            return {"ok": False}
+        self._playback_thread = None
+        if controller.stop_requested and not controller.game_paused:
+            try:
+                controller.check_interruption()
+            except PlaybackInterrupted:
+                pass
         logger.info(
             f"[playback] paused frame={self._last_playback_frame} "
             f"state={self._last_playback_state}"
@@ -562,29 +588,25 @@ class ArkLoopApi:
         logger.info("[debug_pause] called")
         try:
             from src.mumu.mumu_controller import pause as game_pause
+            from src.mumu.mumu_vision import capture_game_window
+            from src.maa import MaaRecognizer
         except Exception as exc:
             logger.error(f"[debug_pause] import failed: {exc}")
             return {"error": str(exc), "frame_before": 0, "frame_after": 0, "paused": False}
-        frame_before = 0
-        try:
-            ws = get_ws_time_source()
-            frame_before = ws.get_game_time()
-        except Exception as exc:
-            logger.warning(f"[debug_pause] ws read failed: {exc}")
-        logger.info(f"[debug_pause] frame_before={frame_before}, sending ESC...")
+        logger.info("[debug_pause] sending ESC...")
         game_pause()
         import time as _time
         _time.sleep(0.2)
-        frame_after = 0
         try:
-            ws = get_ws_time_source()
-            frame_after = ws.get_game_time()
+            image = capture_game_window(ratio=None, color=True)
+            paused = bool(MaaRecognizer().detect_state(image).get("paused"))
         except Exception as exc:
-            logger.warning(f"[debug_pause] ws read after failed: {exc}")
+            logger.warning(f"[debug_pause] pause image recognition failed: {exc}")
+            return {"error": str(exc), "frame_before": 0, "frame_after": 0, "paused": False}
         result = {
-            "frame_before": int(frame_before),
-            "frame_after": int(frame_after),
-            "paused": frame_after <= frame_before,
+            "frame_before": 0,
+            "frame_after": 0,
+            "paused": paused,
         }
         logger.info(f"[debug_pause] {result}")
         return result

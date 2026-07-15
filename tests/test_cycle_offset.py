@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import threading
 import unittest
 from unittest.mock import patch
 
 from recorder.action_recognizer import ActionType, DirectionType, SemanticAction
 from recorder.backend import AxisBuilder
-from src.axis.axis_runner import AxisRunner, BreakpointHit
+from src.axis.axis_runner import AxisRunner
+from src.axis.playback_controller import PlaybackController
 from src.logic.action import Action, ActionType as RunnerActionType, DirectionType as RunnerDirectionType
 
 
@@ -107,7 +107,6 @@ class AxisRunnerOffsetTests(unittest.TestCase):
         r = _StubRunner(
             actions=actions,
             settings={},
-            is_paused=lambda: False,
             frame_offset=100,
             performed_log=log,
             gt_sequence=[],
@@ -122,7 +121,6 @@ class AxisRunnerOffsetTests(unittest.TestCase):
         r = _StubRunner(
             actions=actions,
             settings={},
-            is_paused=lambda: False,
             frame_offset=0,
             performed_log=log,
             gt_sequence=[],
@@ -137,10 +135,11 @@ class AxisRunnerBreakpointTests(unittest.TestCase):
         log: list = []
         on_pause_calls: list = []
 
+        controller = PlaybackController()
         r = _StubRunner(
             actions=actions,
             settings={},
-            is_paused=lambda: False,
+            playback_controller=controller,
             frame_offset=0,
             breakpoints=[60],
             on_pause=lambda f: on_pause_calls.append(f),
@@ -148,9 +147,11 @@ class AxisRunnerBreakpointTests(unittest.TestCase):
             gt_sequence=[75, 60],
         )
 
-        with patch(
-            "src.axis.axis_runner.get_game_time",
-            side_effect=_patched_get_game_time(iter([75, 60])),
+        with (
+            patch("src.axis.axis_runner.get_game_time", side_effect=_patched_get_game_time(iter([75, 60]))),
+            patch("src.axis.playback_controller._image_reports_paused", return_value=True),
+            patch("src.axis.playback_controller.mouseclick", return_value=None),
+            patch("src.axis.playback_controller.time.sleep", return_value=None),
         ):
             r.run()
 
@@ -165,7 +166,6 @@ class AxisRunnerBreakpointTests(unittest.TestCase):
         r = _StubRunner(
             actions=actions,
             settings={},
-            is_paused=lambda: False,
             frame_offset=0,
             breakpoints=[90],
             on_pause=lambda f: on_pause_calls.append(f),
@@ -189,7 +189,6 @@ class AxisRunnerBreakpointTests(unittest.TestCase):
         r = _StubRunner(
             actions=actions,
             settings={},
-            is_paused=lambda: False,
             frame_offset=150,
             breakpoints=[60],
             on_pause=lambda f: on_pause_calls.append(f),
@@ -205,32 +204,30 @@ class AxisRunnerBreakpointTests(unittest.TestCase):
         self.assertEqual(log, [(60, "x")])
         self.assertEqual(on_pause_calls, [])
 
-    def test_stop_event_during_breakpoint_poll_aborts(self):
+    def test_controller_stop_during_breakpoint_poll_aborts(self):
         actions = [_make_action(150, "x")]
         log: list = []
 
-        stop_event = threading.Event()
+        controller = PlaybackController()
         gt_seq = [0, 15]
 
-        def _check():
-            res = stop_event.is_set()
-            stop_event.set()
-            return res
+        def _read_and_stop():
+            controller.request_stop(source="test")
+            return gt_seq.pop(0)
 
         r = _StubRunner(
             actions=actions,
             settings={},
-            is_paused=_check,
+            playback_controller=controller,
             frame_offset=0,
             breakpoints=[90],
-            stop_event=stop_event,
             performed_log=log,
             gt_sequence=gt_seq,
         )
 
         with patch(
             "src.axis.axis_runner.get_game_time",
-            side_effect=_patched_get_game_time(iter(gt_seq)),
+            side_effect=_read_and_stop,
         ):
             r.run()
 
@@ -241,7 +238,7 @@ class RunnerStateSeedTests(unittest.TestCase):
     """initial_state seeding + skipped-action state registration."""
 
     def _runner(self, **kwargs) -> AxisRunner:
-        return AxisRunner(actions=[], settings={}, is_paused=lambda: False, **kwargs)
+        return AxisRunner(actions=[], settings={}, **kwargs)
 
     def test_initial_state_seeds_deployed(self):
         r = self._runner(initial_state={"deployed": {"极境": (4, 1), "桃金娘": [2, 7]}})

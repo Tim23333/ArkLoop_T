@@ -13,6 +13,7 @@ ui/src React app
   -> src/desktop services
       -> recorder/backend.py for live recording
       -> src/axis/axis_runner.py for playback
+      -> src/axis/playback_controller.py for precise playback state
       -> timeline/config/resource services for app data
   -> src/mumu capture and input
   -> src/maa + recorder/action_recognizer.py for recognition
@@ -43,6 +44,9 @@ files are loaded. It is not derived from calibration files.
 
 - `scripts/arkloop_webview.py` is the desktop composition root: window
   creation, API exposure, recording/playback lifecycle, and shutdown wiring.
+- `src/axis/axis_runner.py` selects and prepares the next timeline action.
+- `src/axis/playback_controller.py` exclusively owns pause, frame stepping,
+  action dispatch, resume, breakpoint pause, and stop handling.
 - `src/desktop/config_service.py` owns `config.json` and WS restart behavior.
 - `src/desktop/timeline_service.py` owns timeline CRUD, presets, pins,
   import/export, loading, appending, and breakpoint persistence.
@@ -65,3 +69,4 @@ files are loaded. It is not derived from calibration files.
 - Offline video scanner and offline axis writer.
 - The old calibration overlay app.
 - Tesseract pause-detection path used only by offline scanning.
+- The JSON/Excel execute-only CLI and Excel COM execution layer.

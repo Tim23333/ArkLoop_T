@@ -78,13 +78,12 @@ dist\ArkLoop\ArkLoop.exe
 ```text
 scripts/                正式入口
   arkloop_webview.py    PyWebview + React 桌面端主入口
-  run.py                旧版 CLI 回放入口
 src/                    核心逻辑
   desktop/              PyWebview API 服务：配置、时间轴、资源、状态发布
   mumu/                 MuMu 模拟器连接、截图、输入注入
   frame/                实时帧源
-  logic/                坐标投影、动作执行、WebSocket 时间源
-  axis/                 时间轴执行器、JSON 加载
+  logic/                坐标投影、游戏输入、WebSocket 时间源
+  axis/                 时间轴调度、PlaybackController、JSON 加载
   maa/                  MAA 识别相关配置与节点
 recorder/               实时录制后端与动作识别
 ui/                     React + Vite + Tailwind 时间轴编辑器

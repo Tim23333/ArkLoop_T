@@ -78,9 +78,6 @@ class ViewCalculationConfig:
     NEAR = 0.3
     FAR = 1000
 
-class GameTimeConfig:
-    TICK_MAX_DEFAULT = 30 # default 1 second = 30 ticks
-
 class RecordingConfig:
     OUTPUT_DIR = "recordings"
     FPS = 60
@@ -107,7 +104,6 @@ class PerformActionConfig:
     PRECISE_PAUSE_FRAMES = 10
     FRAME_STEP_INTERVAL = 0.008
     PAUSE_TOGGLE_SETTLE = 0.05
-    PAUSE_VERIFY_STABLE_TIME = 0.06
     PAUSE_VERIFY_RETRIES = 3
     LATE_SKIP_TOLERANCE_FRAMES = 2
     MINIMUM_WAITTIME = 0.02

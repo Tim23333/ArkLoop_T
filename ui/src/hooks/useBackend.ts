@@ -143,6 +143,18 @@ export function useBackend() {
         setAxis((event.data as unknown as AxisAction[]) ?? [])
       } else if (event.event_type === 'ws_status') {
         setWsStatus(event.data as WSStatus)
+      } else if (event.event_type === 'playback_state') {
+        const playback = event.data as {
+          phase?: string
+          target_frame?: number | null
+          game_paused?: boolean
+        }
+        setState((prev) => ({
+          ...(prev ?? {}),
+          playback_phase: playback.phase,
+          playback_target_frame: playback.target_frame,
+          playback_game_paused: playback.game_paused,
+        }) as BackendState)
       }
     }
     window.__onBackendEvent = handler

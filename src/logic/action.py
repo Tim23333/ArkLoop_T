@@ -8,7 +8,6 @@ from src.logger import logger
 
 class ActionType(Enum):
     DEPLOY = "部署"
-    SELECT = "选中"
     SKILL = "技能"
     RETREAT = "撤退"
 

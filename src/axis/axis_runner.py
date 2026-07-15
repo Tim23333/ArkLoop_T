@@ -1,29 +1,22 @@
-import threading
 import time
-from typing import Callable, Dict, Any, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from src.cache import get_map_by_code, get_map_by_name
 from src.config import PerformActionConfig as actionconfig
-from src.excel import StatusColor
+from src.axis.playback_controller import (
+    PlaybackController,
+    PlaybackInterrupted,
+)
 from src.logic.action import Action, ActionType
 from src.logic.auto_enter import auto_enter
 from src.logic.calc_view import transform_map_to_view
 from src.logic.convert_pos import convert_position
-from src.logic.analyze_time import get_game_time, set_game_time_observer, set_time_source
+from src.logic.analyze_time import get_game_time, set_game_time_observer
 from src.logic.ws_time_source import get_ws_time_source
-from src.logic.perform_action import perform_action, UserPausedError
 from src.logger import logger
 from src.utils.error_to_log import ErrorToLog
 
-__all__ = ["AxisRunner", "BreakpointHit"]
-
-
-class BreakpointHit(Exception):
-    """Raised when the runner's wait loop reaches a configured breakpoint."""
-
-    def __init__(self, frame: int):
-        super().__init__(f"Breakpoint hit at frame {frame}")
-        self.frame = frame
+__all__ = ["AxisRunner"]
 
 
 class AxisRunner:
@@ -37,13 +30,10 @@ class AxisRunner:
         self,
         actions: List[Action],
         settings: Dict[str, Any],
-        is_paused: Callable[[], bool],
+        playback_controller: Optional[PlaybackController] = None,
         autoenter: bool = False,
         show_error: Optional[Callable[[str], None]] = None,
-        set_result_color: Optional[Callable[[int], None]] = None,
         debug: bool = False,
-        tick_callback: Optional[Callable[[int, int], None]] = None,
-        stop_event: Optional[threading.Event] = None,
         frame_offset: int = 0,
         breakpoints: Optional[List[int]] = None,
         on_pause: Optional[Callable[[int], None]] = None,
@@ -51,20 +41,16 @@ class AxisRunner:
     ):
         self.actions = actions
         self.settings = settings
-        self._external_is_paused = is_paused
+        self.playback = playback_controller or PlaybackController()
         self.autoenter = autoenter
         self.show_error = show_error
-        self.set_result_color = set_result_color
         self.debug = debug
-        self.tick_callback = tick_callback
-        self.stop_event = stop_event
         # Absolute frame offset for resume: actions with frame < frame_offset
         # are skipped (already executed in a previous session).
         self.frame_offset = frame_offset
         # Sorted list of absolute frame breakpoints.
         self.breakpoints: List[int] = sorted(breakpoints or [])
         self.on_pause = on_pause
-        self._pause_requested = False
         self._breakpoint_idx: int = 0
         # State machine snapshot for recognizer warm-up on resume.
         self._runner_state: Dict[str, Any] = {
@@ -95,18 +81,18 @@ class AxisRunner:
                     continue
 
     def is_paused(self) -> bool:
-        """Return True if the runner should stop at the next safe point."""
-        if self._pause_requested:
+        """Settle a pending controller request and report whether to stop."""
+        if not self.playback.stop_requested:
+            return False
+        try:
+            self.playback.check_interruption()
+        except PlaybackInterrupted:
             return True
-        if self.stop_event is not None and self.stop_event.is_set():
-            return True
-        if self._external_is_paused is not None:
-            return self._external_is_paused()
         return False
 
     def _check_breakpoints(self, frame: int) -> None:
         """Trigger pause for any breakpoints whose frame has been reached."""
-        if self._pause_requested or not self.breakpoints:
+        if self.playback.stop_requested or not self.breakpoints:
             return
         while self._breakpoint_idx < len(self.breakpoints):
             bp_frame = self.breakpoints[self._breakpoint_idx]
@@ -117,17 +103,15 @@ class AxisRunner:
 
     def _trigger_breakpoint(self, bp_frame: int) -> None:
         """Perform the same stop-and-notify as the UI Pause button."""
-        if self._pause_requested:
+        if self.playback.stop_requested:
             return
         logger.info(f"Breakpoint reached at frame {bp_frame}")
+        self.playback.pause_at_breakpoint(bp_frame)
         if self.on_pause is not None:
             try:
                 self.on_pause(int(bp_frame))
             except Exception:
                 logger.exception("on_pause callback failed at breakpoint")
-        self._pause_requested = True
-        if self.stop_event is not None:
-            self.stop_event.set()
 
     def _apply_settings(self):
         """Apply top-level settings to global config."""
@@ -158,10 +142,6 @@ class AxisRunner:
         else:
             raise ErrorToLog("未指定关卡。")
 
-    def _set_result(self, color: int):
-        if self.set_result_color is not None:
-            self.set_result_color(color)
-
     def _update_runner_state(self, action: Action) -> None:
         """Update the state-machine snapshot after an action has been executed."""
         if action.action_type == ActionType.DEPLOY:
@@ -190,7 +170,10 @@ class AxisRunner:
 
     def get_state(self) -> Dict[str, Any]:
         """Return a JSON-serializable snapshot of the execution state machine."""
-        return dict(self._runner_state)
+        state = dict(self._runner_state)
+        state["deployed"] = dict(self._runner_state["deployed"])
+        state["playback"] = self.playback.snapshot()
+        return state
 
     def _await_breakpoints_until(self, bp_idx: int, target_frame: int) -> int:
         """Wait until all breakpoints up to ``target_frame`` are reached.
@@ -227,8 +210,6 @@ class AxisRunner:
             raise ErrorToLog(
                 "时间源 WS 未连接，无法回放。请在设置中配置正确的 WS 地址并启动游戏时间服务。"
             )
-        set_time_source(ws)
-
         self._apply_settings()
         map_data = self._load_map()
         view_data_front = transform_map_to_view(map_data, False)
@@ -357,27 +338,28 @@ class AxisRunner:
                 action.view_pos_front = view_data_front[action.tile_pos[1]][action.tile_pos[0]]
                 action.view_pos_side = view_data_side[action.tile_pos[1]][action.tile_pos[0]]
 
-                # Perform the action
+                # The controller owns precise timing, pause, input and resume.
                 try:
-                    perform_action(action, self.is_paused)
-                    self._set_result(StatusColor.SUCCESS)
+                    self.playback.execute(action)
                     self._update_runner_state(action)
-                except UserPausedError:
+                except PlaybackInterrupted as exc:
+                    if exc.action_completed:
+                        self._update_runner_state(action)
                     logger.info("Paused/stopped during action execution, stopping runner.")
                     break
-                except Exception as e:
-                    self._set_result(StatusColor.FAILURE)
+                except Exception:
                     raise
 
             # Drain breakpoints past the last action.
             if not self.is_paused():
                 self._await_breakpoints_until(bp_idx, 10 ** 18)
+            self.playback.mark_completed()
 
         except ErrorToLog as e:
             logger.error(f"Error occurred: {e}")
             if self.show_error is not None:
                 self.show_error(str(e))
-        except UserPausedError:
+        except PlaybackInterrupted:
             logger.info("User-initiated stop while waiting for breakpoint/action")
         except Exception as e:
             logger.exception(f"Unhandled runner error: {type(e).__name__}: {e!r}")
@@ -386,7 +368,6 @@ class AxisRunner:
                 self.show_error(f"未定义错误：{msg}")
         finally:
             set_game_time_observer(None)
-            set_time_source(None)
             if self.debug:
                 logger.info("Press any key to exit.")
                 input()

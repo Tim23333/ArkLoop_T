@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from recorder.action_recognizer import ActionType, DirectionType, SemanticAction
-from recorder.backend import AxisBuilder
+from recorder.backend import AxisBuilder, write_axis_json
 
 
 class AxisBuilderTests(unittest.TestCase):
@@ -128,6 +131,15 @@ class AxisBuilderTests(unittest.TestCase):
         )
         self.builder.on_semantic_action(ignore)
         self.assertEqual(len(self.builder.get_axis()), 0)
+
+    def test_json_writer_omits_retired_timing_thresholds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "axis.json"
+            write_axis_json([], "1-7", 30, output)
+            settings = json.loads(output.read_text(encoding="utf-8"))["settings"]
+
+        self.assertNotIn("bullet_threshold", settings)
+        self.assertNotIn("frame_threshold", settings)
 
 
 if __name__ == "__main__":

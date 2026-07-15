@@ -1,41 +1,16 @@
 import time
-from typing import Callable
 
 from src.logger import logger
 from src.config import GameRatioConfig as ratioconfig
 from src.config import PerformActionConfig as actionconfig
-from src.logic.action import Action, ActionType, DirectionType
+from src.logic.action import Action, DirectionType
 from src.logic.locate_avatar import locate_avatar
-from src.logic.analyze_time import get_game_time, wait_for_game_time_update
 from src.mumu.mumu_controller import (
     mouseclick,
     mousedown,
     mouseup,
     mousemove,
 )
-
-
-class PerformLateError(Exception):
-    def __init__(self, actual_frame: int, scheduled_frame: int):
-        super().__init__(
-            f"Performed action at frame {actual_frame} instead of {scheduled_frame}"
-        )
-        self.actual_frame = actual_frame
-        self.scheduled_frame = scheduled_frame
-
-    def __str__(self):
-        return (
-            f"Performed action at frame {self.actual_frame} "
-            f"instead of {self.scheduled_frame}"
-        )
-
-
-class UserPausedError(Exception):
-    pass
-
-
-class PrecisePauseError(Exception):
-    pass
 
 
 def _drag_mouse(
@@ -81,120 +56,6 @@ def _end_drag(end: tuple[float, float]) -> None:
     """Release the held mouse button."""
     mouseup(end)
     time.sleep(actionconfig.MINIMUM_WAITTIME)
-
-
-def _toggle_game_pause(settle: bool = False) -> None:
-    """Toggle the in-game pause/play button without sending ESC."""
-    mouseclick(ratioconfig.PAUSE_BUTTON_RATIO)
-    if settle:
-        time.sleep(
-            float(
-                getattr(
-                    actionconfig,
-                    "PAUSE_TOGGLE_SETTLE",
-                    actionconfig.MINIMUM_WAITTIME,
-                )
-            )
-        )
-
-
-def _frame_stable_for(duration: float, user_paused: Callable[[], bool]) -> bool:
-    """Return True when the frame counter does not advance for ``duration``."""
-    duration = max(0.0, float(duration))
-    if duration <= 0:
-        return True
-
-    start_frame = get_game_time()
-    deadline = time.perf_counter() + duration
-    while time.perf_counter() < deadline:
-        if user_paused():
-            raise UserPausedError()
-        remaining = max(0.0, deadline - time.perf_counter())
-        wait_for_game_time_update(timeout=min(0.01, remaining))
-        current_frame = get_game_time()
-        if current_frame != start_frame:
-            logger.debug(
-                f"pause verification saw frame advance "
-                f"{start_frame}->{current_frame}"
-            )
-            return False
-    return True
-
-
-def _ensure_game_paused(user_paused: Callable[[], bool], label: str) -> None:
-    """Verify pause state by checking that the frame counter is stable."""
-    stable_time = float(
-        getattr(actionconfig, "PAUSE_VERIFY_STABLE_TIME", 0.06)
-    )
-    retries = max(1, int(getattr(actionconfig, "PAUSE_VERIFY_RETRIES", 3)))
-
-    for attempt in range(retries):
-        if _frame_stable_for(stable_time, user_paused):
-            return
-        logger.warning(
-            f"Game still advancing during {label}; "
-            f"retrying pause ({attempt + 1}/{retries})"
-        )
-        _toggle_game_pause(settle=True)
-
-    if _frame_stable_for(stable_time, user_paused):
-        return
-    raise PrecisePauseError(f"Unable to verify game pause before {label}")
-
-
-def _wait_running_until(target_frame: int, user_paused: Callable[[], bool]) -> None:
-    """Wait while the game is running until ``target_frame`` is reached."""
-    while get_game_time() < target_frame:
-        if user_paused():
-            raise UserPausedError()
-        wait_for_game_time_update(timeout=0.01)
-
-
-def _frame_step_paused_until(target_frame: int, user_paused: Callable[[], bool]) -> None:
-    """While paused, briefly resume every 8ms until the target frame arrives."""
-    interval = float(getattr(actionconfig, "FRAME_STEP_INTERVAL", 0.008))
-    while get_game_time() < target_frame:
-        if user_paused():
-            raise UserPausedError()
-        _toggle_game_pause()
-        time.sleep(interval)
-        _toggle_game_pause(settle=True)
-        wait_for_game_time_update(timeout=interval)
-    _ensure_game_paused(user_paused, "target-frame action")
-
-
-def _enter_precise_pause(
-    target_frame: int,
-    focus_pos: tuple[float, float] | None,
-    user_paused: Callable[[], bool],
-    on_pause_entered: Callable[[], None] | None = None,
-) -> None:
-    """Enter bullet-time, pause near target, then frame-step to target."""
-    bullet_frames = int(getattr(actionconfig, "BULLET_TIME_FRAMES", 30))
-    pause_frames = int(getattr(actionconfig, "PRECISE_PAUSE_FRAMES", 10))
-    bullet_frame = max(0, target_frame - bullet_frames)
-    pause_frame = max(bullet_frame, target_frame - pause_frames)
-
-    _wait_running_until(bullet_frame, user_paused)
-    if focus_pos is not None:
-        mouseclick(focus_pos)
-        time.sleep(actionconfig.MINIMUM_WAITTIME)
-
-    _wait_running_until(pause_frame, user_paused)
-    _toggle_game_pause(settle=True)
-    _ensure_game_paused(user_paused, "precise-pause entry")
-    if on_pause_entered is not None:
-        on_pause_entered()
-    _frame_step_paused_until(target_frame, user_paused)
-
-
-def _resume_precise_pause(precise_paused: bool, label: str) -> None:
-    if not precise_paused:
-        return
-    try:
-        _toggle_game_pause(settle=True)
-    except Exception:
-        logger.debug(f"failed to resume after {label}", exc_info=True)
 
 
 def _direction_end_pos(action: Action) -> tuple[float, float] | None:
@@ -281,85 +142,3 @@ def perform_retreat(action: Action) -> None:
     """Retreat an operator. The game must already be paused at target frame."""
     mouseclick(ratioconfig.RETREAT_RATIO)
     time.sleep(actionconfig.MINIMUM_WAITTIME)
-
-
-def _preselect_pos(action: Action) -> tuple[float, float]:
-    if action.action_type == ActionType.DEPLOY:
-        return ratioconfig.LAST_OPER_RATIO
-    if action.action_type in (ActionType.SKILL, ActionType.RETREAT):
-        if action.view_pos_front is None:
-            raise ValueError(f"Missing front-view position for {action.action_type}")
-        return action.view_pos_front
-    raise ValueError(f"Unsupported playback action type: {action.action_type}")
-
-
-def perform_action(action: Action, user_paused: Callable[[], bool]) -> None:
-    logger.debug(f"Performing action: {action}")
-
-    target_frame = action.get_game_time()
-    precise_paused = False
-    action_completed = False
-
-    def mark_precise_paused() -> None:
-        nonlocal precise_paused
-        precise_paused = True
-
-    try:
-        _enter_precise_pause(
-            target_frame,
-            _preselect_pos(action),
-            user_paused,
-            mark_precise_paused,
-        )
-        if user_paused():
-            raise UserPausedError()
-
-        if action.action_type == ActionType.DEPLOY:
-            perform_deploy(action)
-        elif action.action_type == ActionType.SKILL:
-            perform_skill(action)
-        elif action.action_type == ActionType.RETREAT:
-            perform_retreat(action)
-        else:
-            raise ValueError(f"Unsupported playback action type: {action.action_type}")
-
-        actual_frame = get_game_time()
-        action_completed = True
-    finally:
-        _resume_precise_pause(precise_paused and action_completed, "action")
-
-    if actual_frame == target_frame:
-        logger.info(f"Performed action: {action}")
-    elif actual_frame > target_frame:
-        logger.warning(f"Performed action: {action} (not on time, frame {actual_frame} vs target {target_frame})")
-    else:
-        logger.warning(f"Performed action: {action} (unexpected time, frame {actual_frame} vs target {target_frame})")
-
-
-if __name__ == "__main__":
-    # Usage and testing
-    from src.cache import get_map_by_code
-    from src.logic.calc_view import transform_map_to_view
-    from src.logic.action import DirectionType
-
-    map = get_map_by_code("1-7")
-    view_map_front = transform_map_to_view(map, False)
-    view_map_side = transform_map_to_view(map, True)
-    action = Action(
-        frame=15,
-        action_type=ActionType.DEPLOY,
-        oper="斑点",
-        pos="D2",
-        direction=DirectionType.RIGHT,
-        alias="",
-        tile_pos=(1, 3),
-        avatar_pos=None,
-        view_pos_front=view_map_front[3][1],
-        view_pos_side=view_map_side[3][1],
-    )
-    start_time = time.time()
-    perform_action(action, lambda: False)
-    end_time = time.time()
-    logger.info(
-        f"Action performed: {action} (time elapsed: {end_time - start_time:.3f} seconds)"
-    )

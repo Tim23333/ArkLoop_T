@@ -8,9 +8,7 @@ This document describes the supported scripts after the WebSocket-time-source re
 | --- | --- | --- |
 | Desktop app | `scripts/arkloop_webview.py` | Starts the PyWebview + React desktop app. This is the main supported entry point. |
 | Backend worker | `scripts/run_action_backend.py` | Runs the live action-recognition backend for debugging. |
-| JSON conversion | `scripts/convert_excel_to_json.py` | Converts legacy Excel timelines into JSON timelines. |
 | Resource metadata | `scripts/generate_unit_metadata.py` | Rebuilds operator metadata resources. |
-| Legacy playback | `run.py --axis ...` | Runs the older CLI playback path for JSON/Excel axes. |
 
 ## Current Test Suite
 

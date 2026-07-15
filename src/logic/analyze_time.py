@@ -11,19 +11,9 @@ from typing import Callable, Optional
 from src.logger import logger
 from src.logic.ws_time_source import get_ws_time_source
 
-# Optional observer notified of every ``get_game_time`` reading.  Playback uses
-# this to stream the live frame to the UI and to check timeline breakpoints.
+# Optional observer notified of every ``get_game_time`` reading. Playback uses
+# it to check timeline breakpoints inside controller wait loops.
 _game_time_observer: Optional[Callable[[int], None]] = None
-
-
-def set_time_source(ts: Optional[object]) -> None:
-    """Deprecated no-op.  The WS singleton is the sole time provider."""
-    pass
-
-
-def get_time_source() -> object:
-    """Return the process-wide WS time source singleton."""
-    return get_ws_time_source()
 
 
 def set_game_time_observer(callback: Optional[Callable[[int], None]]) -> None:

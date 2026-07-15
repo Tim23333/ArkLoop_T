@@ -171,8 +171,6 @@ def write_axis_json(
         "wait_time1": performconfig.MINIMUM_WAITTIME,
         "wait_time2": performconfig.FRAME_WAITTIME,
         "wait_time3": performconfig.GENERAL_WAITTIME,
-        "bullet_threshold": performconfig.BULLET_THRESHOLD,
-        "frame_threshold": performconfig.FRAME_THRESHOLD,
     }
     if map_name is not None:
         settings["map_name"] = map_name
