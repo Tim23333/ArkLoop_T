@@ -107,10 +107,11 @@ class PlaybackControllerTests(unittest.TestCase):
             view_pos_side=(0.5, 0.5),
         )
 
-    def _run_controller(self, action, image_result=True):
+    def _run_controller(self, action):
         from src.axis import playback_controller
 
         frame = {"value": 0}
+        paused = {"value": False}
         clicks = []
         executed = []
         sleeps = []
@@ -119,17 +120,26 @@ class PlaybackControllerTests(unittest.TestCase):
             frame["value"] += 1
             return True
 
+        def click(pos):
+            clicks.append((frame["value"], pos))
+            if pos == playback_controller.ratioconfig.PAUSE_BUTTON_RATIO:
+                paused["value"] = not paused["value"]
+
         controller = playback_controller.PlaybackController()
         with (
             patch.object(playback_controller.actionconfig, "BULLET_TIME_FRAMES", 30),
             patch.object(playback_controller.actionconfig, "PRECISE_PAUSE_FRAMES", 10),
-            patch.object(playback_controller.actionconfig, "FRAME_STEP_INTERVAL", 0.008),
+            patch.object(playback_controller.actionconfig, "PAUSE_TOGGLE_MIN_INTERVAL", 0.0),
+            patch.object(playback_controller.actionconfig, "FRAME_STEP_UPDATE_TIMEOUT", 0.1),
+            patch.object(playback_controller.actionconfig, "FRAME_STEP_POLL_INTERVAL", 0.001),
             patch.object(playback_controller.actionconfig, "PAUSE_TOGGLE_SETTLE", 0.0),
+            patch.object(playback_controller.actionconfig, "ACTION_RESUME_DELAY", 0.0),
+            patch.object(playback_controller.actionconfig, "RESUME_TOGGLE_SETTLE", 0.0),
             patch.object(playback_controller.actionconfig, "MINIMUM_WAITTIME", 0.0),
             patch.object(playback_controller, "get_game_time", side_effect=lambda: frame["value"]),
             patch.object(playback_controller, "wait_for_game_time_update", side_effect=advance_frame),
-            patch.object(playback_controller, "_image_reports_paused", return_value=image_result),
-            patch.object(playback_controller, "mouseclick", side_effect=lambda pos: clicks.append((frame["value"], pos))),
+            patch.object(playback_controller, "_image_reports_paused", side_effect=lambda: paused["value"]),
+            patch.object(playback_controller, "mouseclick", side_effect=click),
             patch.object(playback_controller, "perform_deploy", side_effect=lambda a: executed.append((frame["value"], a.action_type))),
             patch.object(playback_controller, "perform_skill", side_effect=lambda a: executed.append((frame["value"], a.action_type))),
             patch.object(playback_controller, "perform_retreat", side_effect=lambda a: executed.append((frame["value"], a.action_type))),
@@ -154,7 +164,89 @@ class PlaybackControllerTests(unittest.TestCase):
         self.assertEqual(executed, [(100, ActionType.SKILL)])
         self.assertEqual(frame["value"], 100)
         self.assertFalse(controller.game_paused)
-        self.assertIn(0.008, sleeps)
+
+    def test_resume_retries_when_first_click_is_ignored(self):
+        from src.axis import playback_controller
+
+        controller = playback_controller.PlaybackController()
+        controller._game_paused = True
+        paused = {"value": True}
+        clicks = []
+
+        def click(_pos):
+            clicks.append(True)
+            if len(clicks) > 1:
+                paused["value"] = False
+
+        with (
+            patch.object(playback_controller.actionconfig, "PAUSE_TOGGLE_MIN_INTERVAL", 0.0),
+            patch.object(playback_controller.actionconfig, "RESUME_TOGGLE_SETTLE", 0.0),
+            patch.object(playback_controller.actionconfig, "RESUME_VERIFY_RETRIES", 2),
+            patch.object(playback_controller, "mouseclick", side_effect=click),
+            patch.object(playback_controller, "_image_reports_paused", side_effect=lambda: paused["value"]),
+            patch.object(playback_controller.time, "sleep", return_value=None),
+        ):
+            controller._resume_game("test action")
+
+        self.assertEqual(len(clicks), 2)
+        self.assertFalse(controller.game_paused)
+
+    def test_pause_toggle_enforces_minimum_interval(self):
+        from src.axis import playback_controller
+
+        controller = playback_controller.PlaybackController()
+        sleeps = []
+        clock = iter([10.0, 10.0, 10.004, 10.020])
+
+        with (
+            patch.object(playback_controller.actionconfig, "PAUSE_TOGGLE_MIN_INTERVAL", 0.016),
+            patch.object(playback_controller, "mouseclick", return_value=None),
+            patch.object(playback_controller.time, "perf_counter", side_effect=lambda: next(clock)),
+            patch.object(playback_controller.time, "sleep", side_effect=lambda value: sleeps.append(value)),
+        ):
+            controller._toggle_game_pause()
+            controller._toggle_game_pause()
+
+        self.assertEqual(len(sleeps), 1)
+        self.assertAlmostEqual(sleeps[0], 0.012)
+
+    def test_frame_step_waits_for_actual_frame_advance_before_pausing(self):
+        from src.axis import playback_controller
+
+        frame = {"value": 90}
+        wake_count = {"value": 0}
+        clicks = []
+        controller = playback_controller.PlaybackController()
+        controller._game_paused = True
+
+        def delayed_advance(*_args, **_kwargs):
+            wake_count["value"] += 1
+            if wake_count["value"] == 3:
+                frame["value"] += 1
+            return True
+
+        with (
+            patch.object(playback_controller.actionconfig, "PAUSE_TOGGLE_MIN_INTERVAL", 0.0),
+            patch.object(playback_controller.actionconfig, "FRAME_STEP_UPDATE_TIMEOUT", 1.0),
+            patch.object(playback_controller.actionconfig, "FRAME_STEP_POLL_INTERVAL", 0.001),
+            patch.object(playback_controller.actionconfig, "PAUSE_TOGGLE_SETTLE", 0.0),
+            patch.object(playback_controller, "get_game_time", side_effect=lambda: frame["value"]),
+            patch.object(playback_controller, "wait_for_game_time_update", side_effect=delayed_advance),
+            patch.object(playback_controller, "_image_reports_paused", return_value=True),
+            patch.object(playback_controller, "mouseclick", side_effect=lambda pos: clicks.append((frame["value"], pos))),
+            patch.object(playback_controller.time, "sleep", return_value=None),
+        ):
+            controller._frame_step_until(91)
+
+        self.assertEqual(wake_count["value"], 3)
+        self.assertEqual(
+            clicks,
+            [
+                (90, playback_controller.ratioconfig.PAUSE_BUTTON_RATIO),
+                (91, playback_controller.ratioconfig.PAUSE_BUTTON_RATIO),
+            ],
+        )
+        self.assertTrue(controller.game_paused)
 
     def test_retreat_uses_same_controller_flow(self):
         from src.logic.action import ActionType
@@ -170,22 +262,33 @@ class PlaybackControllerTests(unittest.TestCase):
         from src.logic.action import ActionType
 
         frame = {"value": 0}
+        paused = {"value": False}
         clicks = []
         executed = []
-        image_results = iter([False, True, True])
+        pause_click_count = {"value": 0}
 
         def advance_frame(*_args, **_kwargs):
             frame["value"] += 1
             return True
 
+        def click(pos):
+            clicks.append((frame["value"], pos))
+            if pos != playback_controller.ratioconfig.PAUSE_BUTTON_RATIO:
+                return
+            pause_click_count["value"] += 1
+            if pause_click_count["value"] > 1:
+                paused["value"] = not paused["value"]
+
         controller = playback_controller.PlaybackController()
         with (
             patch.object(playback_controller.actionconfig, "PAUSE_TOGGLE_SETTLE", 0.0),
+            patch.object(playback_controller.actionconfig, "ACTION_RESUME_DELAY", 0.0),
+            patch.object(playback_controller.actionconfig, "RESUME_TOGGLE_SETTLE", 0.0),
             patch.object(playback_controller.actionconfig, "MINIMUM_WAITTIME", 0.0),
             patch.object(playback_controller, "get_game_time", side_effect=lambda: frame["value"]),
             patch.object(playback_controller, "wait_for_game_time_update", side_effect=advance_frame),
-            patch.object(playback_controller, "_image_reports_paused", side_effect=lambda: next(image_results)),
-            patch.object(playback_controller, "mouseclick", side_effect=lambda pos: clicks.append((frame["value"], pos))),
+            patch.object(playback_controller, "_image_reports_paused", side_effect=lambda: paused["value"]),
+            patch.object(playback_controller, "mouseclick", side_effect=click),
             patch.object(playback_controller, "perform_skill", side_effect=lambda _a: executed.append(frame["value"])),
             patch.object(playback_controller.time, "sleep", return_value=None),
         ):
@@ -254,6 +357,7 @@ class PlaybackControllerTests(unittest.TestCase):
 
         frame = {"value": 0}
         controller = playback_controller.PlaybackController()
+        paused = {"value": False}
         clicks = []
 
         def advance_frame(*_args, **_kwargs):
@@ -262,13 +366,19 @@ class PlaybackControllerTests(unittest.TestCase):
                 controller.request_stop()
             return True
 
+        def click(pos):
+            clicks.append((frame["value"], pos))
+            if pos == playback_controller.ratioconfig.PAUSE_BUTTON_RATIO:
+                paused["value"] = not paused["value"]
+
         with (
             patch.object(playback_controller.actionconfig, "PAUSE_TOGGLE_SETTLE", 0.0),
+            patch.object(playback_controller.actionconfig, "RESUME_TOGGLE_SETTLE", 0.0),
             patch.object(playback_controller.actionconfig, "MINIMUM_WAITTIME", 0.0),
             patch.object(playback_controller, "get_game_time", side_effect=lambda: frame["value"]),
             patch.object(playback_controller, "wait_for_game_time_update", side_effect=advance_frame),
-            patch.object(playback_controller, "_image_reports_paused", return_value=True),
-            patch.object(playback_controller, "mouseclick", side_effect=lambda pos: clicks.append((frame["value"], pos))),
+            patch.object(playback_controller, "_image_reports_paused", side_effect=lambda: paused["value"]),
+            patch.object(playback_controller, "mouseclick", side_effect=click),
             patch.object(playback_controller, "perform_skill", side_effect=AssertionError("action must not execute")),
             patch.object(playback_controller.time, "sleep", return_value=None),
         ):

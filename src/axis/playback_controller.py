@@ -97,6 +97,7 @@ class PlaybackController:
         self._current_frame = 0
         self._action_type: str | None = None
         self._game_paused = False
+        self._last_pause_toggle_at: float | None = None
 
     @property
     def stop_requested(self) -> bool:
@@ -163,7 +164,21 @@ class PlaybackController:
         self._publish()
 
     def _toggle_game_pause(self, settle: bool = False) -> None:
+        minimum_interval = max(
+            0.0,
+            float(actionconfig.PAUSE_TOGGLE_MIN_INTERVAL),
+        )
+        now = time.perf_counter()
+        with self._lock:
+            last_toggle_at = self._last_pause_toggle_at
+        if last_toggle_at is not None:
+            remaining = minimum_interval - (now - last_toggle_at)
+            if remaining > 0:
+                time.sleep(remaining)
+
         mouseclick(ratioconfig.PAUSE_BUTTON_RATIO)
+        with self._lock:
+            self._last_pause_toggle_at = time.perf_counter()
         if settle:
             time.sleep(float(actionconfig.PAUSE_TOGGLE_SETTLE))
 
@@ -198,15 +213,38 @@ class PlaybackController:
         self._toggle_game_pause(settle=True)
         self._ensure_game_paused(label)
 
+    def _ensure_game_resumed(self, label: str) -> None:
+        retries = max(1, int(actionconfig.RESUME_VERIFY_RETRIES))
+        for attempt in range(retries + 1):
+            try:
+                if not _image_reports_paused():
+                    with self._lock:
+                        self._game_paused = False
+                    self._publish()
+                    return
+            except Exception:
+                logger.warning(
+                    f"Resume image recognition failed after {label}",
+                    exc_info=True,
+                )
+            if attempt >= retries:
+                break
+            logger.warning(
+                f"Game still paused after {label}; "
+                f"retrying resume ({attempt + 1}/{retries})"
+            )
+            self._toggle_game_pause()
+            time.sleep(float(actionconfig.RESUME_TOGGLE_SETTLE))
+        raise PrecisePauseError(f"Unable to verify game resume after {label}")
+
     def _resume_game(self, label: str) -> None:
         if not self.game_paused:
             return
         self._set_phase(PlaybackPhase.RESUMING)
-        self._toggle_game_pause(settle=True)
-        with self._lock:
-            self._game_paused = False
+        self._toggle_game_pause()
+        time.sleep(float(actionconfig.RESUME_TOGGLE_SETTLE))
+        self._ensure_game_resumed(label)
         logger.debug(f"Game resumed after {label}")
-        self._publish()
 
     def _settle_interruption(self, action_completed: bool = False) -> None:
         with self._lock:
@@ -259,20 +297,57 @@ class PlaybackController:
             wait_for_game_time_update(timeout=0.01)
         self.check_interruption()
 
+    def _wait_for_frame_advance(self, start_frame: int) -> int:
+        timeout = max(0.0, float(actionconfig.FRAME_STEP_UPDATE_TIMEOUT))
+        poll_interval = max(
+            0.001,
+            float(actionconfig.FRAME_STEP_POLL_INTERVAL),
+        )
+        deadline = time.perf_counter() + timeout
+        current_frame = self._read_frame()
+
+        while current_frame <= start_frame:
+            self.check_interruption()
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                break
+            wait_for_game_time_update(timeout=min(poll_interval, remaining))
+            current_frame = self._read_frame()
+        return current_frame
+
     def _frame_step_until(self, target_frame: int) -> None:
         self._set_phase(PlaybackPhase.FRAME_STEPPING)
-        interval = float(actionconfig.FRAME_STEP_INTERVAL)
-        while self._read_frame() < target_frame:
+        current_frame = self._read_frame()
+        while current_frame < target_frame:
             self.check_interruption()
+
+            start_frame = current_frame
             self._toggle_game_pause()
             with self._lock:
                 self._game_paused = False
-            time.sleep(interval)
+
+            self._wait_for_frame_advance(start_frame)
+
             self._toggle_game_pause(settle=True)
             with self._lock:
                 self._game_paused = True
-            wait_for_game_time_update(timeout=interval)
-        self._ensure_game_paused("target-frame action")
+            self._ensure_game_paused("frame step")
+
+            current_frame = self._read_frame()
+            if current_frame <= start_frame:
+                raise PrecisePauseError(
+                    "Game frame did not advance after resume; playback remains paused"
+                )
+            logger.debug(
+                f"Frame step {start_frame} -> {current_frame} "
+                f"(target {target_frame})"
+            )
+
+        if current_frame > target_frame:
+            logger.warning(
+                f"Frame step overshot target: frame {current_frame} "
+                f"vs target {target_frame}"
+            )
         self.check_interruption()
 
     @staticmethod
@@ -324,6 +399,8 @@ class PlaybackController:
             self._execute_input(action)
             actual_frame = self._read_frame()
 
+            self.check_interruption(action_completed=True)
+            time.sleep(float(actionconfig.ACTION_RESUME_DELAY))
             self.check_interruption(action_completed=True)
             self._resume_game("action")
             self._set_phase(PlaybackPhase.WAITING_ACTION)

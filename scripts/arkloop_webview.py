@@ -91,6 +91,10 @@ class ArkLoopApi:
         self.window = window
         self.backend: Optional[ActionBackend] = None
         self._lock = threading.Lock()
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_started = threading.Event()
+        self._shutdown_finished = threading.Event()
+        self._shutdown_thread: Optional[threading.Thread] = None
         self.config_service = ConfigService(user_root)
         self.resource_service = ResourceService(project_root)
         self.timeline_service = TimelineService(timelines_dir, window)
@@ -641,24 +645,51 @@ class ArkLoopApi:
         except Exception as exc:
             logger.debug(f"Failed to push event to frontend: {exc}")
 
-    def _shutdown(self) -> None:
-        with self._lock:
-            if self.backend is not None:
+    def _finish_shutdown(self) -> None:
+        try:
+            controller = self._playback_controller
+            if controller is not None:
+                controller.request_stop(source="shutdown")
+
+            # Detach under the API lock, then stop outside it. Backend workers
+            # may emit a final callback that also needs this lock.
+            with self._lock:
+                backend = self.backend
+                self.backend = None
+            if backend is not None:
                 try:
-                    self.backend.stop()
+                    backend.stop()
                 except Exception:
                     logger.exception("Error stopping backend during shutdown")
-                self.backend = None
-        # Stop any running playback thread.
-        try:
-            self.stop_playback(reset_state=True)
-        except Exception:
-            pass
-        # Stop the process-wide WS time source.
-        try:
-            get_ws_time_source().stop()
-        except Exception:
-            logger.debug("WS time source stop failed during shutdown", exc_info=True)
+
+            try:
+                self.stop_playback(reset_state=True)
+            except Exception:
+                logger.debug("Playback stop failed during shutdown", exc_info=True)
+
+            try:
+                get_ws_time_source().stop()
+            except Exception:
+                logger.debug("WS time source stop failed during shutdown", exc_info=True)
+        finally:
+            self._shutdown_finished.set()
+
+    def _shutdown(self) -> None:
+        """Begin idempotent background cleanup without blocking window close."""
+        with self._shutdown_lock:
+            if self._shutdown_started.is_set():
+                return
+            self._shutdown_started.set()
+
+            self._shutdown_thread = threading.Thread(
+                target=self._finish_shutdown,
+                name="arkloop-shutdown",
+                daemon=True,
+            )
+            self._shutdown_thread.start()
+
+    def _wait_for_shutdown(self, timeout: float) -> bool:
+        return self._shutdown_finished.wait(timeout=max(0.0, float(timeout)))
 
 
 def main() -> None:
@@ -700,11 +731,10 @@ def main() -> None:
         if not name.startswith('_') and callable(getattr(api, name))
     ])
 
-    # OS-native title-bar X bypasses any frontend JS — wire the pywebview
-    # closing event to ``_shutdown()`` so the backend (pynput mouse listener,
-    # FrameSource and input hooks actually get stopped.  Without this, a
-    # post-recording exit leaves pynput's non-daemon Listener thread holding
-    # the interpreter alive even after the window has disappeared.
+    # OS-native title-bar X bypasses frontend JS. Begin cleanup from the native
+    # close event, but never run thread joins on WebView's UI thread. The
+    # process-exit path below gives cleanup a brief
+    # grace period before forcing termination.
     try:
         window.events.closing += lambda: api._shutdown()
     except Exception as exc:
@@ -737,6 +767,7 @@ def main() -> None:
     # process to terminate so no orphan python.exe lingers.
     try:
         api._shutdown()
+        api._wait_for_shutdown(timeout=1.0)
     except Exception:
         pass
     os._exit(0)
