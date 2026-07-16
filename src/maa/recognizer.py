@@ -258,6 +258,23 @@ class MaaRecognizer:
 
         return result
 
+    def detect_pause_state(self, image: np.ndarray) -> Optional[bool]:
+        """Return paused/running from pause-related image nodes only.
+
+        ``None`` means neither the paused icon nor a running speed icon could
+        be confirmed. Keeping that state distinct prevents a recognition miss
+        from being treated as a successful resume.
+        """
+        paused_detail = self._run_node(_STATE_NODES["paused"], image)
+        if paused_detail is not None and paused_detail.hit:
+            return True
+
+        for node_name in _SPEED_NODES.values():
+            speed_detail = self._run_node(node_name, image)
+            if speed_detail is not None and speed_detail.hit:
+                return False
+        return None
+
     def ocr_region(
         self,
         image: np.ndarray,

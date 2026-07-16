@@ -39,6 +39,7 @@ class MouseEvent:
     button: Optional[str] = None  # "left" | "right" | "middle" | "x1" | "x2"
     pressed: Optional[bool] = None  # True for mousedown, False for mouseup
     ts: float = 0.0  # seconds since listener start
+    frame: Optional[int] = None  # WS frame captured on the input hook
     extra: dict = field(default_factory=dict)
 
 
@@ -66,10 +67,12 @@ class MouseListener:
         self,
         callback: Optional[Callable[[MouseEvent], None]] = None,
         record_moves: bool = False,
+        frame_provider: Optional[Callable[[], int]] = None,
     ):
         self._events: List[MouseEvent] = []
         self._callback = callback
         self._record_moves = record_moves
+        self._frame_provider = frame_provider
         self._start_ts: Optional[float] = None
         self._listener: Optional[mouse.Listener] = None
         self._lock = threading.Lock()
@@ -92,6 +95,14 @@ class MouseListener:
         if self._start_ts is None:
             return 0.0
         return time.perf_counter() - self._start_ts
+
+    def _current_frame(self) -> Optional[int]:
+        if self._frame_provider is None:
+            return None
+        try:
+            return int(self._frame_provider())
+        except Exception:
+            return None
 
     def _record(self, event: MouseEvent) -> None:
         """Append an event and optionally notify the user callback."""
@@ -123,6 +134,7 @@ class MouseListener:
                 button=button_name,
                 pressed=pressed,
                 ts=self._now(),
+                frame=self._current_frame(),
             )
         )
 
@@ -152,6 +164,7 @@ class MouseListener:
                 x=x,
                 y=y,
                 ts=self._now(),
+                frame=self._current_frame(),
                 extra={"dx": dx, "dy": dy},
             )
         )

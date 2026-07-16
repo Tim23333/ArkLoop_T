@@ -26,6 +26,7 @@ interface TimelineProps {
   onDeleteAction?: (block: AxisBlock) => void
   onAddBreakpoint?: (frame: number) => void
   onRemoveBreakpoint?: (frame: number) => void
+  overlay?: boolean
 }
 
 type ContextMenuState =
@@ -57,6 +58,7 @@ export function Timeline({
   onDeleteAction,
   onAddBreakpoint,
   onRemoveBreakpoint,
+  overlay = false,
 }: TimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [containerHeight, setContainerHeight] = useState(0)
@@ -225,11 +227,20 @@ export function Timeline({
 
   return (
     <div
-      className="relative flex-1 min-h-[180px] bg-gradient-to-br from-timeline-bg to-timeline-bg-end flex select-none outline-none"
+      className={[
+        'relative flex-1 min-h-[180px] flex select-none outline-none',
+        overlay ? 'bg-black/10' : 'bg-gradient-to-br from-timeline-bg to-timeline-bg-end',
+      ].join(' ')}
       tabIndex={-1}
     >
-      <div className="w-timeline-left shrink-0 flex flex-col z-20 bg-gradient-to-br from-timeline-bg to-timeline-bg-end border-r border-grid-light">
-        <div className="h-[43px] shrink-0 flex items-center px-5 bg-timeline-top border-b border-grid-light">
+      <div className={[
+        'shrink-0 flex flex-col z-20 border-r border-grid-light',
+        overlay ? 'w-[116px] bg-black/15' : 'w-timeline-left bg-gradient-to-br from-timeline-bg to-timeline-bg-end',
+      ].join(' ')}>
+        <div className={[
+          'h-[43px] shrink-0 flex items-center border-b border-grid-light',
+          overlay ? 'px-3 bg-black/15' : 'px-5 bg-timeline-top',
+        ].join(' ')}>
           <TransportControls
             isRecording={recording}
             isPlaying={playing}
@@ -239,17 +250,18 @@ export function Timeline({
             onPlay={onPlay}
             onStopPlay={onStopPlay}
             onPause={onPause}
+            compact={overlay}
           />
         </div>
         <div className="flex-1 flex flex-col min-h-0">
           <div className="flex-1 flex items-center px-4 border-b border-grid-light">
-            <span className="text-[15px] font-medium text-text-muted font-ui">部署</span>
+            <span className={`${overlay ? 'text-[13px]' : 'text-[15px]'} font-medium text-text-muted font-ui`}>部署</span>
           </div>
           <div className="flex-1 flex items-center px-4 border-b border-grid-light">
-            <span className="text-[15px] font-medium text-text-muted font-ui">技能</span>
+            <span className={`${overlay ? 'text-[13px]' : 'text-[15px]'} font-medium text-text-muted font-ui`}>技能</span>
           </div>
           <div className="flex-1 flex items-center px-4">
-            <span className="text-[15px] font-medium text-text-muted font-ui">撤退</span>
+            <span className={`${overlay ? 'text-[13px]' : 'text-[15px]'} font-medium text-text-muted font-ui`}>撤退</span>
           </div>
         </div>
       </div>
@@ -266,7 +278,7 @@ export function Timeline({
         onContextMenu={handleEmptyContextMenu}
       >
         <div className="relative min-h-full" style={{ minWidth: innerWidth }}>
-          <div className="h-[43px] bg-timeline-top border-b border-grid-light relative">
+          <div className={`h-[43px] border-b border-grid-light relative ${overlay ? 'bg-black/15' : 'bg-timeline-top'}`}>
             <Ruler ticks={ticks} leftMargin={0} />
           </div>
 

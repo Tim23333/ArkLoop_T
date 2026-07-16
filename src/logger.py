@@ -1,5 +1,8 @@
 import logging
+import sys
 from enum import Enum
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 class LogLevelColor(Enum):
     DEBUG = '\033[94m'  # Blue
@@ -18,14 +21,38 @@ class ColoredFormatter(logging.Formatter):
 
 logger = logging.getLogger("DebugLogger")
 logger.setLevel(logging.DEBUG)
+logger.propagate = False
 
-ch = logging.StreamHandler()
-ch.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s - %(levelname)-7s - %(message)s')
 
-formatter = ColoredFormatter('%(asctime)s - %(levelname)-7s - %(message)s')
-ch.setFormatter(formatter)
+if not logger.handlers:
+    if sys.stderr is not None:
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.DEBUG)
+        console_handler.setFormatter(
+            ColoredFormatter('%(asctime)s - %(levelname)-7s - %(message)s')
+        )
+        logger.addHandler(console_handler)
 
-logger.addHandler(ch)
+    log_root = (
+        Path(sys.executable).parent
+        if getattr(sys, "frozen", False)
+        else Path(__file__).resolve().parent.parent
+    )
+    try:
+        log_dir = log_root / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            log_dir / "arkloop.log",
+            maxBytes=5 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        )
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+    except OSError:
+        pass
 
 if __name__ == "__main__":
     logger.debug("Debug message")

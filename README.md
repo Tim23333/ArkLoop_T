@@ -77,7 +77,7 @@ cd ArkLoop_T
 ### 2. 创建 Python 环境
 
 ```powershell
-py -3.11 -m venv .venv
+py -3.12 -m venv .venv
 .venv\Scripts\python.exe -m pip install --upgrade pip
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
@@ -88,7 +88,7 @@ py -3.11 -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements-gpu.txt
 ```
 
-不安装 GPU 依赖时会使用 CPU 路径，不影响时间轴格式和功能。
+不安装 GPU 依赖时会使用 CPU 路径，不影响时间轴格式和功能。源码模式会自动检测当前虚拟环境中的 CUDA Torch；打包版则使用独立依赖目录，不会把 Torch 放进主程序。
 
 ### 3. 构建前端
 
@@ -243,7 +243,25 @@ npm run build
 powershell -ExecutionPolicy Bypass -File build_arkloop.ps1
 ```
 
-输出目录：`dist\ArkLoop\ArkLoop.exe`。
+该命令默认只重建 CPU 主程序，并保留 `dist\ArkLoop\dependencies` 中已安装的 GPU 依赖和现有安装器。需要同时发布新版依赖安装器时使用：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File build_arkloop.ps1 -BuildInstaller
+```
+
+输出目录：
+
+- `dist\ArkLoop\ArkLoop.exe`：默认 CPU 识别的主程序，不包含 Torch/CUDA。
+- `dist\ArkLoop\ArkLoopDependencyInstaller.exe`：可选依赖安装器。
+
+打包版用户首次运行依赖安装器时可以选择：
+
+- **仅使用 CPU**：只写入 CPU 模式设置，不下载任何额外依赖。
+- **使用 GPU 加速**：先验证当前目录中的 CUDA 12.1 版 PyTorch；版本和文件完整时直接复用，不重复下载，否则才进入下载或修复安装。
+
+Torch wheel 下载到 `dependencies\downloads`，支持断线续传。网络中断时保留 `.part` 文件，下次运行安装器会从已有进度继续；安装成功后自动删除下载文件。
+
+主程序启动时读取 `dependencies\mode.json`。普通构建会把启动模式重置为 CPU，但不会删除已安装的 GPU 文件；可以在主页面点击 CPU/GPU 模式按钮进行运行时切换。GPU 安装缺失、损坏或 CUDA 不可用时会记录警告并回退到 CPU，不影响时间轴的其他功能。
 
 ## 当前架构边界
 
@@ -257,7 +275,7 @@ powershell -ExecutionPolicy Bypass -File build_arkloop.ps1
 
 ## 日志与问题反馈
 
-源码模式和打包模式默认使用控制台日志。出现无法录制、动作帧偏移、部署失败或暂停状态异常时，请保留：
+源码模式会输出控制台日志；打包版不会打开 CMD 窗口，日志写入 `ArkLoop.exe` 同目录下的 `logs\arkloop.log`，单个文件最大 5 MB，并保留 3 份轮转记录。出现无法录制、动作帧偏移、部署失败或暂停状态异常时，请保留：
 
 - 完整控制台日志。
 - 对应时间轴 JSON。

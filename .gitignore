@@ -162,6 +162,11 @@ _internal/
 # Resource sync temp/output directories
 new_resource/
 _tmp_sync/
+.build-cache/
+.test-tmp/
+.arkloop-resource-sync/
+.resource-sync-backup/
+dependencies/
 
 # Recorded gameplay videos
 recordings/
@@ -211,4 +216,5 @@ sample*.xlsm
 # Exceptions: keep these PyInstaller spec files in version control
 # -----------------------------------------------------------------------------
 !arkloop.spec
+!dependency_installer.spec
 !prts+.spec

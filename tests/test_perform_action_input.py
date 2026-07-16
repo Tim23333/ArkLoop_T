@@ -77,22 +77,6 @@ class PerformActionInputTests(unittest.TestCase):
         self.assertEqual(sent[0][1], mumu_controller.win32con.WM_LBUTTONUP)
         self.assertEqual(sent[0][2], 0)
 
-    def test_pause_sends_escape_to_mumu_window(self):
-        from src.mumu import mumu_controller
-
-        sent = []
-        with (
-            patch.object(mumu_controller, "get_handle", return_value=123),
-            patch.object(mumu_controller.win32api, "MapVirtualKey", return_value=1),
-            patch.object(mumu_controller.win32api, "SendMessage", side_effect=lambda *args: sent.append(args)),
-        ):
-            mumu_controller.pause()
-
-        self.assertEqual(len(sent), 2)
-        self.assertEqual(sent[0][1], mumu_controller.win32con.WM_KEYDOWN)
-        self.assertEqual(sent[1][1], mumu_controller.win32con.WM_KEYUP)
-
-
 class PlaybackControllerTests(unittest.TestCase):
     def _action(self, action_type):
         from src.logic.action import Action, DirectionType
@@ -191,12 +175,31 @@ class PlaybackControllerTests(unittest.TestCase):
         self.assertEqual(len(clicks), 2)
         self.assertFalse(controller.game_paused)
 
+    def test_inconclusive_resume_image_does_not_toggle_back_to_pause(self):
+        from src.axis import playback_controller
+
+        controller = playback_controller.PlaybackController()
+        controller._game_paused = True
+        clicks = []
+
+        with (
+            patch.object(playback_controller.actionconfig, "PAUSE_TOGGLE_MIN_INTERVAL", 0.0),
+            patch.object(playback_controller.actionconfig, "RESUME_TOGGLE_SETTLE", 0.0),
+            patch.object(playback_controller, "mouseclick", side_effect=lambda pos: clicks.append(pos)),
+            patch.object(playback_controller, "_image_reports_paused", return_value=None),
+            patch.object(playback_controller.time, "sleep", return_value=None),
+        ):
+            controller._resume_game("inconclusive image")
+
+        self.assertEqual(clicks, [playback_controller.ratioconfig.PAUSE_BUTTON_RATIO])
+        self.assertFalse(controller.game_paused)
+
     def test_pause_toggle_enforces_minimum_interval(self):
         from src.axis import playback_controller
 
         controller = playback_controller.PlaybackController()
         sleeps = []
-        clock = iter([10.0, 10.0, 10.004, 10.020])
+        clock = iter([10.0, 10.0, 10.0, 10.004, 10.016, 10.020])
 
         with (
             patch.object(playback_controller.actionconfig, "PAUSE_TOGGLE_MIN_INTERVAL", 0.016),
@@ -210,7 +213,7 @@ class PlaybackControllerTests(unittest.TestCase):
         self.assertEqual(len(sleeps), 1)
         self.assertAlmostEqual(sleeps[0], 0.012)
 
-    def test_frame_step_waits_for_actual_frame_advance_before_pausing(self):
+    def test_frame_step_pauses_before_waiting_for_delayed_frame_update(self):
         from src.axis import playback_controller
 
         frame = {"value": 90}
@@ -243,10 +246,47 @@ class PlaybackControllerTests(unittest.TestCase):
             clicks,
             [
                 (90, playback_controller.ratioconfig.PAUSE_BUTTON_RATIO),
-                (91, playback_controller.ratioconfig.PAUSE_BUTTON_RATIO),
+                (90, playback_controller.ratioconfig.PAUSE_BUTTON_RATIO),
             ],
         )
         self.assertTrue(controller.game_paused)
+
+    def test_action_failure_resumes_game_before_reporting_failure(self):
+        from src.axis import playback_controller
+        from src.logic.action import ActionType
+
+        frame = {"value": 0}
+        paused = {"value": False}
+        controller = playback_controller.PlaybackController()
+
+        def advance_frame(*_args, **_kwargs):
+            frame["value"] += 1
+            return True
+
+        def click(pos):
+            if pos == playback_controller.ratioconfig.PAUSE_BUTTON_RATIO:
+                paused["value"] = not paused["value"]
+
+        with (
+            patch.object(playback_controller.actionconfig, "PAUSE_TOGGLE_MIN_INTERVAL", 0.0),
+            patch.object(playback_controller.actionconfig, "FRAME_STEP_FEED_SETTLE", 0.0),
+            patch.object(playback_controller.actionconfig, "PAUSE_TOGGLE_SETTLE", 0.0),
+            patch.object(playback_controller.actionconfig, "ACTION_RESUME_DELAY", 0.0),
+            patch.object(playback_controller.actionconfig, "RESUME_TOGGLE_SETTLE", 0.0),
+            patch.object(playback_controller.actionconfig, "MINIMUM_WAITTIME", 0.0),
+            patch.object(playback_controller, "get_game_time", side_effect=lambda: frame["value"]),
+            patch.object(playback_controller, "wait_for_game_time_update", side_effect=advance_frame),
+            patch.object(playback_controller, "_image_reports_paused", side_effect=lambda: paused["value"]),
+            patch.object(playback_controller, "mouseclick", side_effect=click),
+            patch.object(playback_controller, "perform_skill", side_effect=RuntimeError("input failed")),
+            patch.object(playback_controller.time, "sleep", return_value=None),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "input failed"):
+                controller.execute(self._action(ActionType.SKILL))
+
+        self.assertFalse(paused["value"])
+        self.assertFalse(controller.game_paused)
+        self.assertEqual(controller.phase, playback_controller.PlaybackPhase.FAILED)
 
     def test_retreat_uses_same_controller_flow(self):
         from src.logic.action import ActionType

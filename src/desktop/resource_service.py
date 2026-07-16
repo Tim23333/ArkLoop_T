@@ -13,12 +13,17 @@ from src.logger import logger
 class ResourceService:
     """Map/operator/avatar resources used by the desktop UI."""
 
-    def __init__(self, project_root: Path) -> None:
-        self.project_root = project_root
+    def __init__(self, project_root: Path, resource_dir: Path | None = None) -> None:
+        self.project_root = Path(project_root)
+        self.resource_dir = Path(resource_dir or self.project_root / "resource")
         self._avatar_cache: Dict[str, str] = {}
 
+    def set_resource_dir(self, resource_dir: Path) -> None:
+        self.resource_dir = Path(resource_dir)
+        self._avatar_cache.clear()
+
     def list_maps(self) -> List[Dict[str, str]]:
-        resource_dir = self.project_root / "resource"
+        resource_dir = self.resource_dir
         code_file = resource_dir / "level_code_mapping.json"
         name_file = resource_dir / "level_name_mapping.json"
         code_map: Dict[str, str] = {}
@@ -43,7 +48,7 @@ class ResourceService:
         return [{"id": k, "name": k} for k in OPERATOR_MAPPING.keys()]
 
     def prewarm_avatars(self, limit: int = 30) -> int:
-        avatar_dir = self.project_root / "resource" / "avatar"
+        avatar_dir = self.resource_dir / "avatar"
         count = 0
         if avatar_dir.is_dir():
             for path in sorted(avatar_dir.glob("*.png"))[:limit]:
@@ -58,7 +63,7 @@ class ResourceService:
             return self._avatar_cache[oper]
 
         base = OPERATOR_MAPPING.get(oper, oper)
-        avatar_dir = self.project_root / "resource" / "avatar"
+        avatar_dir = self.resource_dir / "avatar"
         candidates = [
             avatar_dir / f"{base}.png",
             avatar_dir / f"{base}_1.png",

@@ -7,6 +7,8 @@ import { NewTimelineDialog } from './components/NewTimelineDialog'
 import { SettingsDialog } from './components/SettingsDialog'
 import { OperatorSearchDialog } from './components/OperatorSearchDialog'
 import { ResizeHandles } from './components/ResizeHandles'
+import { MiniOverlay } from './components/MiniOverlay'
+import { ResourceSyncButton } from './components/ResourceSyncButton'
 import { useBackend } from './hooks/useBackend'
 import { useTimelineEditor } from './hooks/useTimelineEditor'
 import { compareActionTime, formatGameTime } from './utils/timeline'
@@ -21,6 +23,9 @@ export default function App() {
     axis: backendAxis,
     state,
     initApp,
+    setAccelerationMode,
+    startResourceSync,
+    getResourceSyncStatus,
     startRecording,
     stopRecording,
     pauseRecording,
@@ -40,6 +45,8 @@ export default function App() {
     setPinnedTimelines,
     getWindowBounds,
     setBounds,
+    setOverlayMode,
+    setOverlayLocked,
     startPlayback,
     stopPlayback,
     pausePlayback,
@@ -60,6 +67,9 @@ export default function App() {
   // ── init ────────────────────────────────────────────────────
   const [isLoading, setIsLoading] = useState(false)
   const [loadingDone, setLoadingDone] = useState(false)
+  const [runtimeMode, setRuntimeMode] = useState<'cpu' | 'gpu' | null>(null)
+  const [isSwitchingRuntimeMode, setIsSwitchingRuntimeMode] = useState(false)
+  const [runtimeModeFeedback, setRuntimeModeFeedback] = useState<{ message: string; error: boolean } | null>(null)
   const didInit = useRef(false)
 
   useEffect(() => {
@@ -67,7 +77,10 @@ export default function App() {
     didInit.current = true
     setIsLoading(true)
     initApp()
-      .then(() => setLoadingDone(true))
+      .then((result) => {
+        setLoadingDone(true)
+        setRuntimeMode(result.runtime_mode ?? null)
+      })
       .catch(() => {})
       .finally(() => setIsLoading(false))
   }, [api, initApp])
@@ -81,6 +94,7 @@ export default function App() {
 
   // ── map data (for new timeline dialog) ────────
   const [mapList, setMapList] = useState<Array<{ code: string; name: string }>>([])
+  const [resourceRevision, setResourceRevision] = useState(0)
   useEffect(() => {
     if (!api) return
     listMaps().then(setMapList).catch(() => {})
@@ -164,6 +178,9 @@ export default function App() {
   const [frameOffset, setFrameOffset] = useState(0)
   const [appendingTo, setAppendingTo] = useState<string>('')
   const [recognizerState, setRecognizerState] = useState<RecognizerState>({})
+  const [isCompactOverlay, setCompactOverlay] = useState(false)
+  const [isOverlayLocked, setOverlayLockedState] = useState(false)
+  const [overlayError, setOverlayError] = useState('')
 
   const handleRecord = useCallback(async () => {
     try {
@@ -174,7 +191,7 @@ export default function App() {
       // treat the new recording as a continuation that appends to the same
       // timeline. This supports the "record after playback" flow where the
       // user wants to keep adding actions to the existing axis.
-      const isResume = !!selectedTimeline && (frameOffset > 0 || loadedAxis.length > 0)
+      const isResume = !!selectedTimeline && (isCompactOverlay || frameOffset > 0 || loadedAxis.length > 0)
       if (isResume) setAppendingTo(selectedTimeline)
       else setAppendingTo('')
       await startRecording(
@@ -188,7 +205,7 @@ export default function App() {
     } catch (e) {
       console.error(e)
     }
-  }, [startRecording, timelineSettings, frameOffset, selectedTimeline, loadedAxis.length, recognizerState])
+  }, [startRecording, timelineSettings, frameOffset, selectedTimeline, loadedAxis.length, recognizerState, isCompactOverlay])
 
   const handleStop = useCallback(async () => {
     try {
@@ -203,13 +220,23 @@ export default function App() {
         setFrameOffset(0)
         setRecognizerState({})
       } else {
+        if (isCompactOverlay) {
+          const result = await setOverlayMode(false)
+          if (result.ok) {
+            setCompactOverlay(false)
+            setOverlayLockedState(false)
+          } else {
+            setOverlayError(result.error ?? '无法打开保存页面')
+            return
+          }
+        }
         setPendingAxis(newActions)
         setShowSaveDialog(true)
       }
     } catch (e) {
       console.error(e)
     }
-  }, [stopRecording, appendingTo, appendToTimeline])
+  }, [stopRecording, appendingTo, appendToTimeline, isCompactOverlay, setOverlayMode])
 
   const handlePauseRecord = useCallback(async () => {
     try {
@@ -393,22 +420,6 @@ export default function App() {
 
   // ── playback state ───────────────────────────────────────────
   const [isPlaying, setIsPlaying] = useState(false)
-  const [autoEnter, setAutoEnter] = useState(false)
-  const [pauseResult, setPauseResult] = useState<string>('')
-
-  const handleDebugPause = useCallback(async () => {
-    if (!api) { setPauseResult('API未就绪'); return }
-    try {
-      const r = await api.debug_pause()
-      if (r.error) {
-        setPauseResult(`错误: ${r.error}`)
-      } else {
-        setPauseResult(`帧 ${r.frame_before}→${r.frame_after} ${r.paused ? '✓已暂停' : '✗未暂停'}`)
-      }
-    } catch (e: any) {
-      setPauseResult(`异常: ${e?.message ?? e}`)
-    }
-  }, [api])
 
   const handlePlay = useCallback(async () => {
     if (!selectedTimeline || isPlaying || isRecording) return
@@ -416,7 +427,6 @@ export default function App() {
       const bps = timelineSettings.breakpoints ?? []
       await startPlayback(
         selectedTimeline,
-        autoEnter,
         frameOffset,
         bps,
       )
@@ -424,7 +434,7 @@ export default function App() {
     } catch (e) {
       console.error(e)
     }
-  }, [selectedTimeline, isPlaying, isRecording, autoEnter, startPlayback, frameOffset, timelineSettings])
+  }, [selectedTimeline, isPlaying, isRecording, startPlayback, frameOffset, timelineSettings])
 
   const handleStopPlay = useCallback(async () => {
     try {
@@ -507,6 +517,14 @@ export default function App() {
         if (ev.data?.source === 'recording') setIsRecording(false)
         if (typeof ev.data?.frame === 'number') setFrameOffset(ev.data.frame)
         if (ev.data?.state) setRecognizerState(ev.data.state as RecognizerState)
+      } else if (ev?.event_type === 'overlay_lock_changed') {
+        const lockData = ev.data as { locked?: boolean }
+        setOverlayLockedState(Boolean(lockData?.locked))
+        setOverlayError('')
+      } else if (ev?.event_type === 'overlay_mode_changed') {
+        const modeData = ev.data as { enabled?: boolean; locked?: boolean }
+        setCompactOverlay(Boolean(modeData?.enabled))
+        setOverlayLockedState(Boolean(modeData?.locked))
       }
     }
     return () => { window.__onBackendEvent = prev }
@@ -516,6 +534,68 @@ export default function App() {
   const gameTimeSec = state?.game_time_sec ?? 0
   const frameCount  = state?.frame_count   ?? 0
   const wsConnected = state?.ws_connected  ?? false
+
+  const handleToggleRuntimeMode = useCallback(async () => {
+    if (!runtimeMode || isSwitchingRuntimeMode) return
+    const requestedMode = runtimeMode === 'cpu' ? 'gpu' : 'cpu'
+    setIsSwitchingRuntimeMode(true)
+    setRuntimeModeFeedback(null)
+    try {
+      const result = await setAccelerationMode(requestedMode)
+      setRuntimeMode(result.mode)
+      setRuntimeModeFeedback({
+        message: result.message ?? result.error ?? `无法切换到 ${requestedMode.toUpperCase()} 模式`,
+        error: !result.ok,
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      setRuntimeModeFeedback({ message: `切换失败：${message}`, error: true })
+    } finally {
+      setIsSwitchingRuntimeMode(false)
+    }
+  }, [runtimeMode, isSwitchingRuntimeMode, setAccelerationMode])
+
+  const handleResourcesSynced = useCallback(async () => {
+    const [operators, maps] = await Promise.all([
+      listOperators().catch(() => [] as OperatorInfo[]),
+      listMaps().catch(() => [] as Array<{ code: string; name: string }>),
+    ])
+    setOperatorList(operators)
+    setMapList(maps)
+    setResourceRevision((value) => value + 1)
+  }, [listMaps, listOperators])
+
+  const handleShowOverlay = useCallback(async () => {
+    setOverlayError('')
+    const result = await setOverlayMode(true)
+    if (result.ok) {
+      setCompactOverlay(true)
+      setOverlayLockedState(false)
+    } else {
+      setOverlayError(result.error ?? '无法切换展示模式')
+    }
+  }, [setOverlayMode])
+
+  const handleRestoreFullView = useCallback(async () => {
+    setOverlayError('')
+    const result = await setOverlayMode(false)
+    if (result.ok) {
+      setCompactOverlay(false)
+      setOverlayLockedState(false)
+    } else {
+      setOverlayError(result.error ?? '无法恢复完整页面')
+    }
+  }, [setOverlayMode])
+
+  const handleToggleOverlayLock = useCallback(async () => {
+    setOverlayError('')
+    const result = await setOverlayLocked(!isOverlayLocked)
+    if (result.ok) {
+      setOverlayLockedState(Boolean(result.locked))
+    } else {
+      setOverlayError(result.error ?? '无法切换窗口锁定')
+    }
+  }, [isOverlayLocked, setOverlayLocked])
 
   // ── displayed axis ───────────────────────────────────────────
   const displayedAxis = useMemo(() => {
@@ -566,7 +646,7 @@ export default function App() {
       })),
     ).then((list) => { if (!cancelled) setMapOperators(list) })
     return () => { cancelled = true }
-  }, [api, deployedOperatorNames, getAvatarUrl])
+  }, [api, deployedOperatorNames, getAvatarUrl, resourceRevision])
 
   const {
     editDialog,
@@ -585,6 +665,42 @@ export default function App() {
     isRecording,
     isPlaying,
   })
+
+  if (isCompactOverlay) {
+    return (
+      <MiniOverlay
+        timelineName={selectedTimeline}
+        frameCount={frameCount}
+        gameTimeSec={gameTimeSec}
+        wsConnected={wsConnected}
+        frameOffset={frameOffset}
+        isRecording={isRecording}
+        isPlaying={isPlaying}
+        isLoading={isLoading}
+        locked={isOverlayLocked}
+        lockError={overlayError}
+        actions={displayedAxis}
+        breakpoints={breakpoints}
+        getAvatarUrl={getAvatarUrl}
+        onRecord={handleRecord}
+        onStop={handleStop}
+        onPlay={handlePlay}
+        onStopPlay={handleStopPlay}
+        onPause={handlePause}
+        onToggleLock={handleToggleOverlayLock}
+        onRestore={handleRestoreFullView}
+        onAddAction={handleAddAction}
+        onEditAction={handleEditAction}
+        onMoveAction={handleMoveAction}
+        onDeleteAction={handleDeleteAction}
+        onAddBreakpoint={handleAddBreakpoint}
+        onRemoveBreakpoint={handleRemoveBreakpoint}
+        getWindowBounds={getWindowBounds}
+        setBounds={setBounds}
+      />
+    )
+  }
+
   return (
     <div className="w-full h-full min-w-[946px] bg-root flex flex-col overflow-hidden">
       {/* Top: sidebar + workspace — flex-[11] to make timeline ~0.8× smaller */}
@@ -620,29 +736,57 @@ export default function App() {
       <div className="flex flex-[4] min-h-[212px] flex-col">
         {/* Toolbar row */}
         <div className="h-8 bg-panel border-y border-border-panel shrink-0 flex items-center gap-4 px-3">
-          {/* Auto-enter toggle — always visible, only functional during playback */}
-          <button
-            onClick={() => setAutoEnter((v) => !v)}
-            className={[
-              'text-xs border border-border-panel rounded px-2 py-0.5 transition-colors whitespace-nowrap',
-              isPlaying ? 'text-text-muted hover:text-text-primary' : 'text-text-dim opacity-50 cursor-default',
-            ].join(' ')}
-          >
-            自动进图: {autoEnter ? '开' : '关'}
-          </button>
-          {/* Debug: toggle game pause */}
-          <button
-            onClick={handleDebugPause}
-            className="text-xs border border-accent-yellow text-accent-yellow rounded px-2 py-0.5 hover:bg-accent-yellow/10 transition-colors whitespace-nowrap"
-          >
-            调试暂停
-          </button>
-          {pauseResult && (
-            <span className="text-xs font-mono text-text-dim">{pauseResult}</span>
-          )}
           {/* Live game time + frame count from the WS time source.
               Idle: also shows the 续录偏移 (frameOffset) input for resume. */}
           <div className="flex items-center gap-4 text-xs font-mono">
+            <button
+              type="button"
+              onClick={handleToggleRuntimeMode}
+              disabled={!runtimeMode || isSwitchingRuntimeMode}
+              className={[
+                'flex min-w-[84px] items-center justify-center gap-1.5 rounded border px-2 py-0.5 font-sans font-semibold tracking-wide transition-colors',
+                runtimeMode && !isSwitchingRuntimeMode ? 'cursor-pointer hover:brightness-125' : 'cursor-wait',
+                runtimeMode === 'gpu'
+                  ? 'border-accent-green/45 bg-accent-green/10 text-accent-green'
+                  : runtimeMode === 'cpu'
+                    ? 'border-accent-blue/40 bg-accent-blue/10 text-accent-blue'
+                    : 'border-border-panel bg-black/10 text-text-dim',
+              ].join(' ')}
+              title={runtimeModeFeedback?.message ?? (runtimeMode === 'gpu' ? '点击尝试切换到 CPU 模式' : '点击尝试切换到 GPU 模式')}
+            >
+              <span
+                className={[
+                  'h-1.5 w-1.5 rounded-full',
+                  runtimeMode === 'gpu'
+                    ? 'bg-accent-green'
+                    : runtimeMode === 'cpu'
+                      ? 'bg-accent-blue'
+                      : 'bg-text-dim animate-pulse',
+                  isSwitchingRuntimeMode ? 'animate-pulse' : '',
+                ].join(' ')}
+              />
+              {isSwitchingRuntimeMode
+                ? '切换中'
+                : runtimeMode === 'gpu'
+                  ? 'GPU 模式'
+                  : runtimeMode === 'cpu'
+                    ? 'CPU 模式'
+                    : '模式检测中'}
+            </button>
+            {runtimeModeFeedback && (
+              <span
+                className={`max-w-64 truncate text-[10px] ${runtimeModeFeedback.error ? 'text-[#ff8a86]' : 'text-accent-green'}`}
+                title={runtimeModeFeedback.message}
+              >
+                {runtimeModeFeedback.message}
+              </span>
+            )}
+            <ResourceSyncButton
+              disabled={isRecording || isPlaying || isSwitchingRuntimeMode}
+              startSync={startResourceSync}
+              getStatus={getResourceSyncStatus}
+              onSynced={handleResourcesSynced}
+            />
             <span
               className="text-text-dim flex items-center gap-1"
               title="游戏实时时间（WS 时间源）"
@@ -672,6 +816,18 @@ export default function App() {
                   title="编辑后下次录制/执行从这里开始"
                   className="w-14 bg-[#11161B] border border-border-panel rounded text-accent-blue text-xs font-mono px-1 py-0.5 focus:outline-none focus:border-accent-blue"
                 />
+              </span>
+            )}
+            <button
+              onClick={handleShowOverlay}
+              className="whitespace-nowrap rounded border border-accent-blue/40 px-2 py-0.5 text-xs text-accent-blue transition-colors hover:border-accent-blue hover:bg-accent-blue/10"
+              title="切换到半透明迷你展示模式"
+            >
+              展示切换
+            </button>
+            {overlayError && (
+              <span className="max-w-48 truncate text-[10px] text-[#ff8a86]" title={overlayError}>
+                {overlayError}
               </span>
             )}
             {appendingTo && (

@@ -330,17 +330,23 @@ class AvatarMatcher:
         if self._gpu_checked:
             return self._gpu_ready
         self._gpu_checked = True
+        acceleration_mode = os.environ.get("ARKLOOP_AVATAR_ACCELERATION", "auto").lower()
+        if acceleration_mode == "cpu":
+            logger.info("AvatarMatcher: CPU mode selected")
+            return False
         try:
             import torch  # noqa: F401
             self._torch = torch
             if not torch.cuda.is_available():
-                logger.info("AvatarMatcher: torch present but CUDA unavailable — CPU path")
+                log = logger.warning if acceleration_mode == "gpu" else logger.info
+                log("AvatarMatcher: torch present but CUDA unavailable — CPU path")
                 return False
             self._device = torch.device("cuda")
             self._gpu_ready = True
             logger.info("AvatarMatcher: CUDA available — batched GPU match enabled")
         except Exception as exc:
-            logger.info(f"AvatarMatcher: torch unavailable ({exc!r}) — CPU path")
+            log = logger.warning if acceleration_mode == "gpu" else logger.info
+            log(f"AvatarMatcher: torch unavailable ({exc!r}) — CPU path")
         return self._gpu_ready
 
     def _ensure_gpu_tensors(self) -> bool:

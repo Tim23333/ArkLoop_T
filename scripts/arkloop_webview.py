@@ -47,6 +47,7 @@ if _sys.platform == "win32":
 import json
 import os
 import signal
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -65,17 +66,61 @@ else:
     project_root = Path(__file__).parent.parent
     user_root = project_root
 timelines_dir = user_root / "timelines"
+bundled_resource_dir = project_root / "resource"
+external_resource_dir = user_root / "resource"
+
+
+def _is_complete_resource_dir(path: Path) -> bool:
+    return path.is_dir() and all(
+        (path / name).is_file()
+        for name in (
+            "operator_mapping.json",
+            "level_code_mapping.json",
+            "level_name_mapping.json",
+        )
+    )
+
+
+runtime_resource_dir = (
+    external_resource_dir
+    if getattr(sys, "frozen", False) and _is_complete_resource_dir(external_resource_dir)
+    else bundled_resource_dir
+)
+resource_sync_target_dir = (
+    external_resource_dir if getattr(sys, "frozen", False) else bundled_resource_dir
+)
+os.environ["ARKLOOP_RESOURCE_PATH"] = str(runtime_resource_dir)
 sys.path.insert(0, str(project_root))
+
+from src.runtime_dependencies import (
+    ACCELERATION_ENV,
+    configure_gpu_dependencies,
+    configure_optional_dependencies,
+    write_dependency_mode,
+)
+
+optional_dependency_state = configure_optional_dependencies(
+    user_root,
+    frozen=bool(getattr(sys, "frozen", False)),
+)
 
 from recorder.backend import ActionBackend, write_axis_json
 from recorder.action_recognizer import AvatarMatcher
 from src.desktop.config_service import ConfigService
 from src.desktop.resource_service import ResourceService
+from src.desktop.resource_sync_service import ResourceSyncService
 from src.desktop.state_publisher import start_state_publisher
 from src.desktop.timeline_service import TimelineService
+from src.desktop.window_overlay import WindowOverlayController
 from src.axis.playback_controller import PlaybackController, PlaybackInterrupted
+from src.cache import configure_resource_path
 from src.logger import logger
 from src.logic.ws_time_source import DEFAULT_WS_URL, get_ws_time_source
+
+if optional_dependency_state.configured:
+    logger.info(optional_dependency_state.message)
+else:
+    logger.warning(optional_dependency_state.message)
 
 try:
     from src.maa import create_side_view_detector
@@ -96,17 +141,23 @@ class ArkLoopApi:
         self._shutdown_finished = threading.Event()
         self._shutdown_thread: Optional[threading.Thread] = None
         self.config_service = ConfigService(user_root)
-        self.resource_service = ResourceService(project_root)
+        self.resource_service = ResourceService(project_root, runtime_resource_dir)
+        self.resource_sync_service = ResourceSyncService(
+            runtime_resource_dir,
+            resource_sync_target_dir,
+        )
         self.timeline_service = TimelineService(timelines_dir, window)
         # Pre-warmed resources (populated in init_app)
         self._cached_matcher: Optional[AvatarMatcher] = None
         self._cached_view_detector: Optional[Any] = None
+        self._acceleration_switching = False
         # Playback
         self._playback_thread: Optional[threading.Thread] = None
         self._playback_controller: Optional[PlaybackController] = None
         self._last_playback_frame: int = 0
         self._last_playback_state: Dict[str, Any] = {}
         self._mouse_debug = mouse_debug
+        self.window_overlay = WindowOverlayController(window, self._push_event)
 
     # ------------------------------------------------------------------
     # Recording lifecycle
@@ -123,6 +174,8 @@ class ArkLoopApi:
         with self._lock:
             if self.backend is not None:
                 return
+            if self.resource_sync_service.is_running:
+                raise RuntimeError("资源同步中，请等待同步完成后再开始录制")
 
             # A paused playback intentionally leaves the game paused. Resume
             # through the same controller before starting a recording session.
@@ -216,6 +269,52 @@ class ArkLoopApi:
     def get_avatar_url(self, oper: str) -> str:
         return self.resource_service.get_avatar_url(oper)
 
+    def start_resource_sync(self) -> Dict[str, Any]:
+        """Start an incremental avatar/map update in a background thread."""
+        with self._lock:
+            playback_active = bool(
+                self._playback_thread is not None and self._playback_thread.is_alive()
+            )
+            if self.backend is not None or playback_active:
+                status = self.resource_sync_service.get_status()
+                return {
+                    **status,
+                    "ok": False,
+                    "running": False,
+                    "phase": "error",
+                    "message": "请先停止录制或播放，再同步资源。",
+                    "error": "请先停止录制或播放，再同步资源。",
+                }
+            if self._acceleration_switching:
+                status = self.resource_sync_service.get_status()
+                return {
+                    **status,
+                    "ok": False,
+                    "running": False,
+                    "phase": "error",
+                    "message": "识别模式正在切换，请稍候。",
+                    "error": "识别模式正在切换，请稍候。",
+                }
+            return self.resource_sync_service.start(self._activate_synced_resources)
+
+    def get_resource_sync_status(self) -> Dict[str, Any]:
+        return self.resource_sync_service.get_status()
+
+    def _activate_synced_resources(self, resource_dir: Path) -> None:
+        configure_resource_path(resource_dir)
+        self.resource_service.set_resource_dir(resource_dir)
+        self.resource_service.prewarm_avatars(limit=30)
+
+        matcher = AvatarMatcher()
+        count = matcher.prewarm()
+        with self._lock:
+            self._cached_matcher = matcher
+        logger.info(
+            "Synchronized resources activated from %s (%s operators pre-warmed)",
+            resource_dir,
+            count,
+        )
+
     def init_app(self) -> dict:
         """Initialize app resources (avatar cache, MAA, directories). Called once on startup."""
         try:
@@ -286,10 +385,126 @@ class ArkLoopApi:
             except Exception as exc:
                 logger.debug(f"Slot-layout pre-warm skipped: {exc}")
 
-            return {"ok": True, "avatars_loaded": count}
+            runtime_mode = (
+                "gpu"
+                if self._cached_matcher is not None
+                and bool(getattr(self._cached_matcher, "_gpu_ready", False))
+                else "cpu"
+            )
+            return {
+                "ok": True,
+                "avatars_loaded": count,
+                "runtime_mode": runtime_mode,
+            }
         except Exception as exc:
             logger.exception(f"init_app error: {exc}")
             return {"ok": False, "error": str(exc)}
+
+    def get_acceleration_mode(self) -> Dict[str, Any]:
+        """Return the recognition mode that is active in this process."""
+        return {"ok": True, "mode": self._effective_acceleration_mode()}
+
+    def set_acceleration_mode(self, mode: str) -> Dict[str, Any]:
+        """Try to switch avatar recognition between CPU and GPU at runtime."""
+        requested_mode = str(mode or "").strip().lower()
+        current_mode = self._effective_acceleration_mode()
+        if requested_mode not in {"cpu", "gpu"}:
+            return {
+                "ok": False,
+                "mode": current_mode,
+                "error": f"不支持的识别模式：{mode}",
+            }
+
+        with self._lock:
+            playback_active = bool(
+                self._playback_thread is not None and self._playback_thread.is_alive()
+            )
+            if self.backend is not None or playback_active or self.resource_sync_service.is_running:
+                return {
+                    "ok": False,
+                    "mode": current_mode,
+                    "error": "请先停止录制或播放，并等待资源同步完成，再切换识别模式。",
+                }
+            if self._acceleration_switching:
+                return {
+                    "ok": False,
+                    "mode": current_mode,
+                    "error": "识别模式正在切换，请稍候。",
+                }
+            if requested_mode == current_mode:
+                return {
+                    "ok": True,
+                    "mode": current_mode,
+                    "changed": False,
+                    "message": f"当前已经是 {current_mode.upper()} 模式。",
+                }
+            self._acceleration_switching = True
+
+        previous_env = os.environ.get(ACCELERATION_ENV)
+        try:
+            if requested_mode == "gpu":
+                dependency_state = configure_gpu_dependencies(
+                    user_root,
+                    frozen=bool(getattr(sys, "frozen", False)),
+                )
+                if not dependency_state.configured:
+                    installer_started = self._launch_dependency_installer()
+                    message = (
+                        "未安装 GPU 依赖，已打开依赖安装程序。安装完成后请再次点击 GPU 模式。"
+                        if installer_started
+                        else "未安装 GPU 依赖，且未找到 ArkLoopDependencyInstaller.exe。"
+                    )
+                    return {
+                        "ok": False,
+                        "mode": current_mode,
+                        "installer_started": installer_started,
+                        "error": message,
+                    }
+            else:
+                os.environ[ACCELERATION_ENV] = "cpu"
+
+            candidate = AvatarMatcher()
+            previous_matcher = self._cached_matcher
+            previous_templates = getattr(previous_matcher, "_templates", None)
+            if isinstance(previous_templates, dict):
+                candidate._templates = previous_templates
+            avatar_count = candidate.prewarm()
+            if requested_mode == "gpu" and not bool(candidate._gpu_ready):
+                raise RuntimeError("PyTorch 已加载，但 CUDA 当前不可用")
+
+            write_dependency_mode(
+                user_root,
+                requested_mode,
+                runtime_switch=True,
+            )
+            self._cached_matcher = candidate
+            logger.info(
+                "Avatar recognition switched to %s (%s operators pre-warmed)",
+                requested_mode.upper(),
+                avatar_count,
+            )
+            result = {
+                "ok": True,
+                "mode": requested_mode,
+                "changed": True,
+                "message": f"已切换到 {requested_mode.upper()} 识别模式。",
+            }
+            self._push_event("acceleration_mode_changed", result)
+            return result
+        except Exception as exc:
+            if previous_env is None:
+                os.environ.pop(ACCELERATION_ENV, None)
+            else:
+                os.environ[ACCELERATION_ENV] = previous_env
+            logger.exception("Failed to switch avatar recognition to %s", requested_mode)
+            return {
+                "ok": False,
+                "mode": current_mode,
+                "error": f"无法切换到 {requested_mode.upper()} 模式：{exc}",
+            }
+        finally:
+            with self._lock:
+                self._acceleration_switching = False
 
     def create_timeline(self) -> str:
         return self.timeline_service.create_timeline()
@@ -351,7 +566,6 @@ class ArkLoopApi:
     def start_playback(
         self,
         name: str,
-        autoenter: bool = False,
         frame_offset: int = 0,
         breakpoints: Optional[List[int]] = None,
     ) -> bool:
@@ -360,6 +574,8 @@ class ArkLoopApi:
         ``frame_offset`` shifts where in the timeline playback starts (resume
         from pause).  ``breakpoints`` is a list of absolute frame numbers.
         """
+        if self.resource_sync_service.is_running:
+            return False
         if self._playback_thread is not None and self._playback_thread.is_alive():
             return False
         path = timelines_dir / name.strip()
@@ -426,7 +642,6 @@ class ArkLoopApi:
                     settings=_settings,
                     # One controller owns stop, pause and frame-accurate action timing.
                     playback_controller=controller,
-                    autoenter=autoenter,
                     show_error=lambda msg: logger.error(f"Playback error: {msg}"),
                     frame_offset=frame_offset_int,
                     breakpoints=bp_frames,
@@ -557,10 +772,25 @@ class ArkLoopApi:
         try:
             if width > 0 and height > 0:
                 self.window.resize(int(width), int(height))
-            if x >= 0 and y >= 0:
-                self.window.move(int(x), int(y))
+            self.window.move(int(x), int(y))
         except Exception:
             pass
+
+    def set_overlay_mode(self, enabled: bool) -> Dict[str, Any]:
+        """Switch between the full editor and compact transparent overlay."""
+        try:
+            return self.window_overlay.set_mode(bool(enabled))
+        except Exception as exc:
+            logger.exception("Failed to switch ArkLoop overlay mode")
+            return {"ok": False, "error": str(exc)}
+
+    def set_overlay_locked(self, locked: bool) -> Dict[str, Any]:
+        """Enable or disable native click-through for the compact overlay."""
+        try:
+            return self.window_overlay.set_locked(bool(locked))
+        except Exception as exc:
+            logger.exception("Failed to change ArkLoop overlay lock")
+            return {"ok": False, "error": str(exc)}
 
     # ------------------------------------------------------------------
     # Window controls (called from frontend title bar)
@@ -585,39 +815,27 @@ class ArkLoopApi:
             pass
 
     # ------------------------------------------------------------------
-    # Debug
-    # ------------------------------------------------------------------
-    def debug_pause(self) -> Dict[str, Any]:
-        """Toggle game pause and return the result for debugging."""
-        logger.info("[debug_pause] called")
-        try:
-            from src.mumu.mumu_controller import pause as game_pause
-            from src.mumu.mumu_vision import capture_game_window
-            from src.maa import MaaRecognizer
-        except Exception as exc:
-            logger.error(f"[debug_pause] import failed: {exc}")
-            return {"error": str(exc), "frame_before": 0, "frame_after": 0, "paused": False}
-        logger.info("[debug_pause] sending ESC...")
-        game_pause()
-        import time as _time
-        _time.sleep(0.2)
-        try:
-            image = capture_game_window(ratio=None, color=True)
-            paused = bool(MaaRecognizer().detect_state(image).get("paused"))
-        except Exception as exc:
-            logger.warning(f"[debug_pause] pause image recognition failed: {exc}")
-            return {"error": str(exc), "frame_before": 0, "frame_after": 0, "paused": False}
-        result = {
-            "frame_before": 0,
-            "frame_after": 0,
-            "paused": paused,
-        }
-        logger.info(f"[debug_pause] {result}")
-        return result
-
-    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+    def _effective_acceleration_mode(self) -> str:
+        matcher = self._cached_matcher
+        return "gpu" if matcher is not None and bool(matcher._gpu_ready) else "cpu"
+
+    def _launch_dependency_installer(self) -> bool:
+        if not bool(getattr(sys, "frozen", False)):
+            return False
+        installer = user_root / "ArkLoopDependencyInstaller.exe"
+        if not installer.is_file():
+            logger.warning("GPU dependency installer not found at %s", installer)
+            return False
+        try:
+            subprocess.Popen([str(installer), "--gpu"], cwd=str(user_root))
+            logger.info("Started GPU dependency installer: %s", installer)
+            return True
+        except OSError as exc:
+            logger.warning("Failed to start GPU dependency installer: %s", exc)
+            return False
+
     def _on_backend_event(self, event_type: str, **kwargs: Any) -> None:
         self._push_event(event_type, kwargs)
         if event_type in ("action", "select_oper", "cancel_deploy"):
@@ -647,6 +865,7 @@ class ArkLoopApi:
 
     def _finish_shutdown(self) -> None:
         try:
+            self.window_overlay.stop()
             controller = self._playback_controller
             if controller is not None:
                 controller.request_stop(source="shutdown")
@@ -720,6 +939,7 @@ def main() -> None:
         on_top=True,
         min_size=(946, 666),
         background_color="#0B0F13",
+        transparent=True,
     )
 
     api = ArkLoopApi(window, mouse_debug=debug_mouse)

@@ -3,7 +3,7 @@
 import json
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from src.input.mouse_listener import MouseEvent, MouseListener
 from src.input.coordinate_mapper import CoordinateMapper, MappedCoordinates
@@ -44,9 +44,15 @@ class ActionRecorder:
         start_ts: Optional[float] = None,
         record_moves: bool = False,
         debug: bool = False,
+        frame_provider: Optional[Callable[[], int]] = None,
     ):
         self.mouse = (
-            mouse_listener if mouse_listener is not None else MouseListener(record_moves=record_moves)
+            mouse_listener
+            if mouse_listener is not None
+            else MouseListener(
+                record_moves=record_moves,
+                frame_provider=frame_provider,
+            )
         )
         self.mapper = mapper if mapper is not None else CoordinateMapper()
         self.start_ts = start_ts
@@ -130,6 +136,7 @@ class ActionRecorder:
         return {
             "type": event.type,
             "ts": event.ts,
+            "frame": event.frame,
             "screen": {"x": event.x, "y": event.y},
             "client": {"x": round(mapped.client_x, 2), "y": round(mapped.client_y, 2)},
             "ratio": {
@@ -160,15 +167,18 @@ class ActionRecorder:
                     "type": "click",
                     "button": ev.get("button"),
                     "start_ts": ev["ts"],
+                    "start_frame": ev.get("frame"),
                     "start_ratio": ev["ratio"],
                     "start_game": ev["game"],
                     "end_ts": ev["ts"],
+                    "end_frame": ev.get("frame"),
                     "end_ratio": ev["ratio"],
                     "end_game": ev["game"],
                     "raw_events": [ev],
                 }
             elif ev["type"] == "mouseup" and pending is not None:
                 pending["end_ts"] = ev["ts"]
+                pending["end_frame"] = ev.get("frame")
                 pending["end_ratio"] = ev["ratio"]
                 pending["end_game"] = ev["game"]
                 pending["raw_events"].append(ev)
@@ -187,7 +197,9 @@ class ActionRecorder:
                     {
                         "type": "scroll",
                         "start_ts": ev["ts"],
+                        "start_frame": ev.get("frame"),
                         "end_ts": ev["ts"],
+                        "end_frame": ev.get("frame"),
                         "start_ratio": ev["ratio"],
                         "end_ratio": ev["ratio"],
                         "start_game": ev["game"],

@@ -9,6 +9,7 @@ interface TransportControlsProps {
   onPlay?: () => void
   onStopPlay?: () => void
   onPause?: () => void
+  compact?: boolean
 }
 
 export function TransportControls({
@@ -20,12 +21,13 @@ export function TransportControls({
   onPlay,
   onStopPlay,
   onPause,
+  compact = false,
 }: TransportControlsProps) {
   const busy = isRecording || isPlaying
   const disabled = isLoading
 
   return (
-    <div className="flex items-center gap-5">
+    <div className={`flex items-center ${compact ? 'gap-3' : 'gap-5'}`}>
       {/* Record — disabled when loading or recording/playing */}
       <button
         onClick={onRecord}

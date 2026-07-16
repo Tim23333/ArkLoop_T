@@ -8,9 +8,10 @@
 # Install on top of requirements.txt (or requirements_no_tesserocr.txt):
 #   .venv\Scripts\python -m pip install -r requirements-gpu.txt
 #
-# Requires an NVIDIA GPU + matching driver.  The PyTorch CUDA 12.1 wheel is
-# large (~2.5 GB), and bundling it in the EXE (build_arkloop.ps1) grows the
-# output from ~540 MB to ~4.9 GB.  The arkloop.spec collects torch
-# conditionally, so a CPU-only venv produces a CPU-only EXE automatically.
-torch>=2.2
-  --index-url https://download.pytorch.org/whl/cu121
+# Requires an NVIDIA GPU with a driver that supports CUDA 12.1. Packaged users
+# should run ArkLoopDependencyInstaller.exe instead. The main ArkLoop bundle
+# always excludes Torch, even when this requirement is installed in the build
+# virtual environment.
+--index-url https://download.pytorch.org/whl/cu121
+--extra-index-url https://pypi.org/simple
+torch==2.5.1+cu121

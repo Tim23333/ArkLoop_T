@@ -3,6 +3,7 @@ import json
 import os
 import glob
 import numpy as np
+from pathlib import Path
 from typing import List, Dict, Any, Callable
 
 from src.logger import logger
@@ -12,11 +13,16 @@ from src.config import ImageProcessingConfig as imgconfig
 __all__ = [
     "load_avatars", "get_avatars", "replace_avatar",
     "load_map_by_code", "get_map_by_code", "load_map_by_name", "get_map_by_name",
-    "load_unit_metadata", "get_unit_metadata",
+    "load_unit_metadata", "get_unit_metadata", "configure_resource_path",
 ]
 
-RESOURCE_PATH = os.path.join(os.path.dirname(__file__), "..", "resource")
-NEW_RESOURCE_PATH = os.path.join(os.path.dirname(__file__), "..", "new_resource")
+RESOURCE_PATH = os.path.abspath(
+    os.environ.get(
+        "ARKLOOP_RESOURCE_PATH",
+        os.path.join(os.path.dirname(__file__), "..", "resource"),
+    )
+)
+NEW_RESOURCE_PATH = os.path.join(os.path.dirname(RESOURCE_PATH), "new_resource")
 
 
 def load_mapping(mapping_file: str) -> Dict[str, str]:
@@ -112,6 +118,48 @@ LEVEL_NAME_MAPPING: Dict[str, str] = load_mapping("level_name_mapping.json")
 avatars: Dict[str, List[np.ndarray]] = {}
 maps: Dict[str, Dict[str, Any]] = {}
 unit_metadata: Dict[str, Dict[str, Any]] = {}
+
+
+def configure_resource_path(resource_path: str | os.PathLike[str]) -> None:
+    """Activate a synchronized resource directory and clear loaded caches."""
+    root = Path(resource_path).resolve()
+    required = (
+        "operator_mapping.json",
+        "level_code_mapping.json",
+        "level_name_mapping.json",
+    )
+    missing = [name for name in required if not (root / name).is_file()]
+    if missing:
+        raise FileNotFoundError(f"Resource directory is incomplete: {', '.join(missing)}")
+
+    def read_mapping(name: str) -> Dict[str, str]:
+        with (root / name).open("r", encoding="utf-8") as stream:
+            data = json.load(stream)
+        if not isinstance(data, dict):
+            raise ValueError(f"{name} must contain a JSON object")
+        return data
+
+    operator_mapping = read_mapping("operator_mapping.json")
+    level_code_mapping = read_mapping("level_code_mapping.json")
+    level_name_mapping = read_mapping("level_name_mapping.json")
+
+    global RESOURCE_PATH, NEW_RESOURCE_PATH
+    RESOURCE_PATH = str(root)
+    NEW_RESOURCE_PATH = str(root.parent / "new_resource")
+    os.environ["ARKLOOP_RESOURCE_PATH"] = RESOURCE_PATH
+
+    # Keep these mapping objects stable because other modules import them by
+    # reference during startup.
+    OPERATOR_MAPPING.clear()
+    OPERATOR_MAPPING.update(operator_mapping)
+    LEVEL_CODE_MAPPING.clear()
+    LEVEL_CODE_MAPPING.update(level_code_mapping)
+    LEVEL_NAME_MAPPING.clear()
+    LEVEL_NAME_MAPPING.update(level_name_mapping)
+    avatars.clear()
+    maps.clear()
+    unit_metadata.clear()
+    logger.info(f"Activated resource directory: {RESOURCE_PATH}")
 
 
 def _resolve_metadata_path(filename: str) -> str:

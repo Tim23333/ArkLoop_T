@@ -310,7 +310,11 @@ class ActionBackend:
 
         # Mouse recorder
         try:
-            self.recorder = ActionRecorder(debug=self._mouse_debug).start()
+            ws = get_ws_time_source()
+            self.recorder = ActionRecorder(
+                debug=self._mouse_debug,
+                frame_provider=ws.get_game_time,
+            ).start()
         except Exception as exc:
             logger.warning(f"Failed to start action recorder: {exc}")
             self.recorder = None
@@ -500,11 +504,17 @@ class ActionBackend:
                         except Exception:
                             frame, frame_ts = (None, 0.0)
 
-                    # Anchor this mouse action to the current frame from WS.
+                    # The input hook captures the frame on mouse-up. Falling
+                    # back to latest keeps synthetic/legacy recorder events usable.
                     tick_state = None
                     try:
                         ws = get_ws_time_source()
-                        ws_frame = ws.get_game_time()
+                        recorded_frame = action.get("end_frame")
+                        ws_frame = (
+                            int(recorded_frame)
+                            if recorded_frame is not None
+                            else ws.get_game_time()
+                        )
                         fc, game_time, mem_ok = ws.latest()
                         tick_state = {
                             "frame": int(ws_frame),

@@ -174,7 +174,7 @@ class ButtonCalibrator:
     def _save(self) -> None:
         """Write only the detection boxes back to src/config.py.
 
-        The point ratios used by execution scripts (e.g. auto_enter) are left
+        The point ratios used by execution scripts are left
         untouched so this calibration only affects recognition, not clicking.
         """
         text = _CONFIG_PATH.read_text(encoding="utf-8")

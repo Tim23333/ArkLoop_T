@@ -32,8 +32,51 @@ export interface TimelineData {
   actions: AxisAction[]
 }
 
+export type AccelerationMode = 'cpu' | 'gpu'
+
+export interface AccelerationModeResult {
+  ok: boolean
+  mode: AccelerationMode
+  changed?: boolean
+  installer_started?: boolean
+  message?: string
+  error?: string
+}
+
+export type ResourceSyncPhase =
+  | 'idle'
+  | 'checking'
+  | 'downloading'
+  | 'installing'
+  | 'reloading'
+  | 'complete'
+  | 'error'
+
+export interface ResourceSyncStatus {
+  ok: boolean
+  running: boolean
+  phase: ResourceSyncPhase
+  progress: number
+  message: string
+  checked_files?: number
+  changed_files?: number
+  downloaded_files?: number
+  downloaded_bytes?: number
+  total_download_bytes?: number
+  avatar_files?: number
+  map_files?: number
+  proxy_mode?: 'system' | 'direct'
+  commits?: Record<string, string>
+  error?: string | null
+  sequence: number
+}
+
 export interface PyWebviewApi {
-  init_app: () => Promise<{ ok: boolean; error?: string; avatars_loaded?: number }>
+  init_app: () => Promise<{ ok: boolean; error?: string; avatars_loaded?: number; runtime_mode?: 'cpu' | 'gpu' }>
+  get_acceleration_mode: () => Promise<AccelerationModeResult>
+  set_acceleration_mode: (mode: AccelerationMode) => Promise<AccelerationModeResult>
+  start_resource_sync: () => Promise<ResourceSyncStatus>
+  get_resource_sync_status: () => Promise<ResourceSyncStatus>
   start_recording: (mapCode: string, maxTick?: number, fakeAvatar?: boolean, frameOffset?: number, recognizerState?: RecognizerState, devices?: MapDevice[]) => Promise<void>
   stop_recording: () => Promise<AxisAction[]>
   pause_recording: () => Promise<{ frame: number; axis: AxisAction[] }>
@@ -56,7 +99,9 @@ export interface PyWebviewApi {
   set_pinned_timelines: (pinned: string[]) => Promise<boolean>
   get_window_bounds: () => Promise<{ x: number; y: number; width: number; height: number }>
   set_bounds: (x: number, y: number, width: number, height: number) => Promise<void>
-  start_playback: (name: string, autoenter?: boolean, frameOffset?: number, breakpoints?: number[]) => Promise<boolean>
+  set_overlay_mode: (enabled: boolean) => Promise<OverlayState>
+  set_overlay_locked: (locked: boolean) => Promise<OverlayState>
+  start_playback: (name: string, frameOffset?: number, breakpoints?: number[]) => Promise<boolean>
   stop_playback: () => Promise<void>
   pause_playback: () => Promise<{ ok: boolean }>
   reset_playback_state: () => Promise<void>
@@ -70,7 +115,15 @@ export interface PyWebviewApi {
   update_app_config: (patch: Partial<AppConfig>) => Promise<boolean>
   get_ws_status: () => Promise<WSStatus>
   restart_ws_source: (url?: string) => Promise<boolean>
-  debug_pause: () => Promise<{ frame_before: number; frame_after: number; paused: boolean; error?: string }>
+}
+
+export interface OverlayState {
+  ok: boolean
+  enabled?: boolean
+  locked?: boolean
+  hotkey_available?: boolean
+  hotkey?: string
+  error?: string
 }
 
 export interface AppConfig {
@@ -164,6 +217,46 @@ export function useBackend() {
   const initApp = useCallback(async () => {
     if (!api) return { ok: false }
     return api.init_app()
+  }, [api])
+
+  const getAccelerationMode = useCallback(async () => {
+    if (!api) return { ok: false, mode: 'cpu', error: 'pywebview.api not available' } as AccelerationModeResult
+    return api.get_acceleration_mode()
+  }, [api])
+
+  const setAccelerationMode = useCallback(async (mode: AccelerationMode) => {
+    if (!api) return { ok: false, mode: 'cpu', error: 'pywebview.api not available' } as AccelerationModeResult
+    return api.set_acceleration_mode(mode)
+  }, [api])
+
+  const startResourceSync = useCallback(async () => {
+    if (!api) {
+      return {
+        ok: false,
+        running: false,
+        phase: 'error',
+        progress: 0,
+        message: '后端尚未就绪',
+        error: 'pywebview.api not available',
+        sequence: -1,
+      } as ResourceSyncStatus
+    }
+    return api.start_resource_sync()
+  }, [api])
+
+  const getResourceSyncStatus = useCallback(async () => {
+    if (!api) {
+      return {
+        ok: false,
+        running: false,
+        phase: 'error',
+        progress: 0,
+        message: '后端尚未就绪',
+        error: 'pywebview.api not available',
+        sequence: -1,
+      } as ResourceSyncStatus
+    }
+    return api.get_resource_sync_status()
   }, [api])
 
   const startRecording = useCallback(
@@ -291,10 +384,20 @@ export function useBackend() {
     return api.set_bounds(x, y, width, height)
   }, [api])
 
+  const setOverlayMode = useCallback(async (enabled: boolean) => {
+    if (!api) return { ok: false, error: 'pywebview.api not available' } as OverlayState
+    return api.set_overlay_mode(enabled)
+  }, [api])
+
+  const setOverlayLocked = useCallback(async (locked: boolean) => {
+    if (!api) return { ok: false, error: 'pywebview.api not available' } as OverlayState
+    return api.set_overlay_locked(locked)
+  }, [api])
+
   const startPlayback = useCallback(
-    async (name: string, autoenter?: boolean, frameOffset?: number, breakpoints?: number[]) => {
+    async (name: string, frameOffset?: number, breakpoints?: number[]) => {
       if (!api) return false
-      return api.start_playback(name, autoenter, frameOffset, breakpoints)
+      return api.start_playback(name, frameOffset, breakpoints)
     },
     [api],
   )
@@ -370,6 +473,10 @@ export function useBackend() {
     state,
     axis,
     initApp,
+    getAccelerationMode,
+    setAccelerationMode,
+    startResourceSync,
+    getResourceSyncStatus,
     startRecording,
     stopRecording,
     pauseRecording,
@@ -390,6 +497,8 @@ export function useBackend() {
     setPinnedTimelines,
     getWindowBounds,
     setBounds,
+    setOverlayMode,
+    setOverlayLocked,
     startPlayback,
     stopPlayback,
     pausePlayback,

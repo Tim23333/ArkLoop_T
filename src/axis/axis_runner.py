@@ -8,7 +8,6 @@ from src.axis.playback_controller import (
     PlaybackInterrupted,
 )
 from src.logic.action import Action, ActionType
-from src.logic.auto_enter import auto_enter
 from src.logic.calc_view import transform_map_to_view
 from src.logic.convert_pos import convert_position
 from src.logic.analyze_time import get_game_time, set_game_time_observer
@@ -31,7 +30,6 @@ class AxisRunner:
         actions: List[Action],
         settings: Dict[str, Any],
         playback_controller: Optional[PlaybackController] = None,
-        autoenter: bool = False,
         show_error: Optional[Callable[[str], None]] = None,
         debug: bool = False,
         frame_offset: int = 0,
@@ -42,7 +40,6 @@ class AxisRunner:
         self.actions = actions
         self.settings = settings
         self.playback = playback_controller or PlaybackController()
-        self.autoenter = autoenter
         self.show_error = show_error
         self.debug = debug
         # Absolute frame offset for resume: actions with frame < frame_offset
@@ -239,9 +236,6 @@ class AxisRunner:
             except Exception as exc:
                 logger.warning(f"Skipping device {name!r} with bad pos {pos!r}: {exc}")
 
-        if self.autoenter and not self.is_paused():
-            auto_enter()
-
         # If the game frame is from a previous battle (high value), wait for
         # it to reset to 0 — the WS frame_count resets when a new battle starts.
         initial_frame = get_game_time()
@@ -368,6 +362,10 @@ class AxisRunner:
                 self.show_error(f"未定义错误：{msg}")
         finally:
             set_game_time_observer(None)
+            try:
+                self.playback.ensure_game_running("runner exit")
+            except Exception:
+                logger.exception("Failed to restore running game state on runner exit")
             if self.debug:
                 logger.info("Press any key to exit.")
                 input()

@@ -5,6 +5,7 @@ import time
 from enum import Enum
 from typing import Any, Callable, Dict, Optional
 
+from src.axis.adaptive_timing import AdaptivePlaybackTiming
 from src.config import GameRatioConfig as ratioconfig
 from src.config import PerformActionConfig as actionconfig
 from src.logger import logger
@@ -66,12 +67,11 @@ def _get_pause_recognizer() -> MaaRecognizer:
     return _pause_recognizer
 
 
-def _image_reports_paused() -> bool:
-    """Return True when the in-game play icon reports a paused battle."""
+def _image_reports_paused() -> bool | None:
+    """Return paused/running, or None when image recognition is inconclusive."""
     image = capture_game_window(ratio=None, color=True)
-    state = _get_pause_recognizer().detect_state(image)
-    paused = bool(state.get("paused"))
-    logger.debug(f"pause image verification: paused={paused}")
+    paused = _get_pause_recognizer().detect_pause_state(image)
+    logger.debug(f"pause image verification: paused={paused!r}")
     return paused
 
 
@@ -98,6 +98,7 @@ class PlaybackController:
         self._action_type: str | None = None
         self._game_paused = False
         self._last_pause_toggle_at: float | None = None
+        self._timing = AdaptivePlaybackTiming.from_config(actionconfig)
 
     @property
     def stop_requested(self) -> bool:
@@ -123,6 +124,7 @@ class PlaybackController:
                 "game_paused": self._game_paused,
                 "stop_mode": self._stop_mode.value if self._stop_mode else None,
                 "stop_source": self._stop_source,
+                "timing": self._timing.snapshot(),
             }
 
     def _publish(self) -> None:
@@ -143,6 +145,7 @@ class PlaybackController:
 
     def _read_frame(self) -> int:
         frame = int(get_game_time())
+        self._timing.observe_frame(frame)
         with self._lock:
             self._current_frame = frame
         return frame
@@ -176,25 +179,51 @@ class PlaybackController:
             if remaining > 0:
                 time.sleep(remaining)
 
+        click_started = time.perf_counter()
         mouseclick(ratioconfig.PAUSE_BUTTON_RATIO)
+        clicked_at = time.perf_counter()
+        self._timing.observe_input_latency(clicked_at - click_started)
         with self._lock:
-            self._last_pause_toggle_at = time.perf_counter()
+            self._last_pause_toggle_at = clicked_at
         if settle:
             time.sleep(float(actionconfig.PAUSE_TOGGLE_SETTLE))
 
-    def _ensure_game_paused(self, label: str) -> None:
-        retries = max(1, int(actionconfig.PAUSE_VERIFY_RETRIES))
-        for attempt in range(retries + 1):
+    def _pause_state_matches(
+        self,
+        expected_paused: bool,
+        label: str,
+    ) -> bool | None:
+        reads = max(1, int(actionconfig.PAUSE_VERIFY_READS))
+        interval = max(0.0, float(actionconfig.PAUSE_VERIFY_READ_INTERVAL))
+        observed_state: bool | None = None
+        for read_index in range(reads):
             try:
-                if _image_reports_paused():
-                    with self._lock:
-                        self._game_paused = True
-                    self._publish()
-                    return
+                current_state = _image_reports_paused()
+                if current_state == expected_paused:
+                    return True
+                if current_state is not None:
+                    observed_state = current_state
             except Exception:
                 logger.warning(
                     f"Pause image recognition failed during {label}",
                     exc_info=True,
+                )
+            if read_index + 1 < reads and interval > 0:
+                time.sleep(interval)
+        return False if observed_state is not None else None
+
+    def _ensure_game_paused(self, label: str) -> None:
+        retries = max(1, int(actionconfig.PAUSE_VERIFY_RETRIES))
+        for attempt in range(retries + 1):
+            matched = self._pause_state_matches(True, label)
+            if matched is True:
+                with self._lock:
+                    self._game_paused = True
+                self._publish()
+                return
+            if matched is None:
+                raise PrecisePauseError(
+                    f"Unable to verify game pause before {label}: image state inconclusive"
                 )
             if attempt >= retries:
                 break
@@ -203,6 +232,8 @@ class PlaybackController:
                 f"retrying pause ({attempt + 1}/{retries})"
             )
             self._toggle_game_pause(settle=True)
+            with self._lock:
+                self._game_paused = True
         raise PrecisePauseError(f"Unable to verify game pause before {label}")
 
     def _pause_game(self, label: str) -> None:
@@ -211,22 +242,28 @@ class PlaybackController:
             return
         self._set_phase(PlaybackPhase.PAUSING)
         self._toggle_game_pause(settle=True)
+        with self._lock:
+            self._game_paused = True
         self._ensure_game_paused(label)
 
     def _ensure_game_resumed(self, label: str) -> None:
         retries = max(1, int(actionconfig.RESUME_VERIFY_RETRIES))
         for attempt in range(retries + 1):
-            try:
-                if not _image_reports_paused():
-                    with self._lock:
-                        self._game_paused = False
-                    self._publish()
-                    return
-            except Exception:
+            matched = self._pause_state_matches(False, f"resume after {label}")
+            if matched is True:
+                with self._lock:
+                    self._game_paused = False
+                self._publish()
+                return
+            if matched is None:
                 logger.warning(
-                    f"Resume image recognition failed after {label}",
-                    exc_info=True,
+                    f"Unable to verify resume after {label}; "
+                    "trusting the delivered resume click without toggling again"
                 )
+                with self._lock:
+                    self._game_paused = False
+                self._publish()
+                return
             if attempt >= retries:
                 break
             logger.warning(
@@ -245,6 +282,34 @@ class PlaybackController:
         time.sleep(float(actionconfig.RESUME_TOGGLE_SETTLE))
         self._ensure_game_resumed(label)
         logger.debug(f"Game resumed after {label}")
+
+    def ensure_game_running(self, label: str = "playback exit") -> None:
+        """Resume the game on every exit except an intentional playback pause."""
+        with self._lock:
+            keep_paused = (
+                self._stop_mode == StopMode.PAUSE
+                or self._phase == PlaybackPhase.PAUSED
+            )
+        if keep_paused:
+            return
+
+        paused = self.game_paused
+        try:
+            detected_state = _image_reports_paused()
+            if detected_state is not None:
+                paused = detected_state
+        except Exception:
+            logger.warning(
+                f"Unable to inspect pause state during {label}; using controller state",
+                exc_info=True,
+            )
+
+        with self._lock:
+            self._game_paused = bool(paused)
+        if paused:
+            self._resume_game(label)
+        else:
+            self._publish()
 
     def _settle_interruption(self, action_completed: bool = False) -> None:
         with self._lock:
@@ -313,6 +378,12 @@ class PlaybackController:
                 break
             wait_for_game_time_update(timeout=min(poll_interval, remaining))
             current_frame = self._read_frame()
+
+        if current_frame > start_frame:
+            settle = max(0.0, float(actionconfig.FRAME_STEP_FEED_SETTLE))
+            if settle > 0:
+                time.sleep(settle)
+                current_frame = self._read_frame()
         return current_frame
 
     def _frame_step_until(self, target_frame: int) -> None:
@@ -325,22 +396,31 @@ class PlaybackController:
             self._toggle_game_pause()
             with self._lock:
                 self._game_paused = False
-
-            self._wait_for_frame_advance(start_frame)
-
+            time.sleep(self._timing.pulse_seconds)
             self._toggle_game_pause(settle=True)
             with self._lock:
                 self._game_paused = True
             self._ensure_game_paused("frame step")
 
-            current_frame = self._read_frame()
+            current_frame = self._wait_for_frame_advance(start_frame)
+            frame_delta = current_frame - start_frame
+            self._timing.record_step(frame_delta)
             if current_frame <= start_frame:
-                raise PrecisePauseError(
-                    "Game frame did not advance after resume; playback remains paused"
+                if self._timing.no_progress_pulses >= int(
+                    actionconfig.FRAME_STEP_MAX_EMPTY_PULSES
+                ):
+                    raise PrecisePauseError(
+                        "Game frame did not advance after repeated adaptive pause pulses"
+                    )
+                logger.debug(
+                    f"Frame pulse made no progress at {start_frame}; "
+                    f"next pulse={self._timing.pulse_seconds * 1000.0:.1f}ms"
                 )
+                continue
             logger.debug(
                 f"Frame step {start_frame} -> {current_frame} "
-                f"(target {target_frame})"
+                f"(target {target_frame}, "
+                f"pulse={self._timing.pulse_seconds * 1000.0:.1f}ms)"
             )
 
         if current_frame > target_frame:
@@ -381,15 +461,26 @@ class PlaybackController:
 
         try:
             bullet_frame = max(0, target_frame - int(actionconfig.BULLET_TIME_FRAMES))
-            pause_frame = max(
-                bullet_frame,
-                target_frame - int(actionconfig.PRECISE_PAUSE_FRAMES),
-            )
 
             self._wait_until(bullet_frame, PlaybackPhase.WAITING_BULLET)
             self._set_phase(PlaybackPhase.PRESELECTING)
+            preselect_started = time.perf_counter()
             mouseclick(self._preselect_pos(action))
+            self._timing.observe_input_latency(time.perf_counter() - preselect_started)
             time.sleep(float(actionconfig.MINIMUM_WAITTIME))
+
+            pause_lead = self._timing.precise_pause_lead(
+                int(actionconfig.PRECISE_PAUSE_FRAMES),
+                min(
+                    int(actionconfig.BULLET_TIME_FRAMES),
+                    int(actionconfig.ADAPTIVE_PRECISE_PAUSE_MAX_FRAMES),
+                ),
+            )
+            pause_frame = max(bullet_frame, target_frame - pause_lead)
+            logger.debug(
+                f"Adaptive precise pause: target={target_frame}, entry={pause_frame}, "
+                f"lead={pause_lead}, timing={self._timing.snapshot()}"
+            )
 
             self._wait_until(pause_frame, PlaybackPhase.WAITING_PAUSE)
             self._pause_game("precise-pause entry")
@@ -407,7 +498,12 @@ class PlaybackController:
         except PlaybackInterrupted:
             raise
         except Exception:
-            self._set_phase(PlaybackPhase.FAILED)
+            try:
+                self.ensure_game_running("failed action")
+            except Exception:
+                logger.exception("Failed to resume game after playback action error")
+            finally:
+                self._set_phase(PlaybackPhase.FAILED)
             raise
 
         if actual_frame == target_frame:
