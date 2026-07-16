@@ -192,25 +192,60 @@ class PlaybackController:
         self,
         expected_paused: bool,
         label: str,
+        *,
+        reads: int | None = None,
+        stable_reads: int | None = None,
     ) -> bool | None:
-        reads = max(1, int(actionconfig.PAUSE_VERIFY_READS))
+        reads = max(
+            1,
+            int(actionconfig.PAUSE_VERIFY_READS if reads is None else reads),
+        )
+        stable_reads = max(
+            1,
+            int(
+                getattr(actionconfig, "PAUSE_VERIFY_STABLE_READS", 1)
+                if stable_reads is None
+                else stable_reads
+            ),
+        )
+        reads = max(reads, stable_reads)
         interval = max(0.0, float(actionconfig.PAUSE_VERIFY_READ_INTERVAL))
-        observed_state: bool | None = None
+        expected_streak = 0
+        opposite_streak = 0
+        max_opposite_streak = 0
+        saw_expected = False
         for read_index in range(reads):
             try:
                 current_state = _image_reports_paused()
                 if current_state == expected_paused:
-                    return True
-                if current_state is not None:
-                    observed_state = current_state
+                    saw_expected = True
+                    expected_streak += 1
+                    opposite_streak = 0
+                    if expected_streak >= stable_reads:
+                        return True
+                elif current_state is None:
+                    expected_streak = 0
+                    opposite_streak = 0
+                else:
+                    expected_streak = 0
+                    opposite_streak += 1
+                    max_opposite_streak = max(max_opposite_streak, opposite_streak)
             except Exception:
                 logger.warning(
                     f"Pause image recognition failed during {label}",
                     exc_info=True,
                 )
+                expected_streak = 0
+                opposite_streak = 0
             if read_index + 1 < reads and interval > 0:
                 time.sleep(interval)
-        return False if observed_state is not None else None
+
+        # A mixed result is deliberately inconclusive. In particular, never
+        # send another toggle after even one paused-icon hit: a slow machine
+        # may simply be showing frames captured around the state transition.
+        if not saw_expected and max_opposite_streak >= stable_reads:
+            return False
+        return None
 
     def _ensure_game_paused(self, label: str) -> None:
         retries = max(1, int(actionconfig.PAUSE_VERIFY_RETRIES))
@@ -233,7 +268,7 @@ class PlaybackController:
             )
             self._toggle_game_pause(settle=True)
             with self._lock:
-                self._game_paused = True
+                self._game_paused = False
         raise PrecisePauseError(f"Unable to verify game pause before {label}")
 
     def _pause_game(self, label: str) -> None:
@@ -243,7 +278,7 @@ class PlaybackController:
         self._set_phase(PlaybackPhase.PAUSING)
         self._toggle_game_pause(settle=True)
         with self._lock:
-            self._game_paused = True
+            self._game_paused = False
         self._ensure_game_paused(label)
 
     def _ensure_game_resumed(self, label: str) -> None:
@@ -399,7 +434,7 @@ class PlaybackController:
             time.sleep(self._timing.pulse_seconds)
             self._toggle_game_pause(settle=True)
             with self._lock:
-                self._game_paused = True
+                self._game_paused = False
             self._ensure_game_paused("frame step")
 
             current_frame = self._wait_for_frame_advance(start_frame)
@@ -429,6 +464,51 @@ class PlaybackController:
                 f"vs target {target_frame}"
             )
         self.check_interruption()
+
+    def _guard_target_pause(self, target_frame: int) -> None:
+        """Seal the target frame without sending another pause toggle."""
+        reads = max(2, int(actionconfig.ACTION_PAUSE_VERIFY_READS))
+        stable_reads = max(
+            2,
+            int(getattr(actionconfig, "PAUSE_VERIFY_STABLE_READS", 2)),
+        )
+        matched = self._pause_state_matches(
+            True,
+            "target action guard",
+            reads=reads,
+            stable_reads=stable_reads,
+        )
+        if matched is not True:
+            raise PrecisePauseError(
+                f"Target frame {target_frame} reached without a stable paused image"
+            )
+
+        first_frame = self._read_frame()
+        if first_frame != target_frame:
+            raise PrecisePauseError(
+                f"Target frame changed before action: {first_frame} vs {target_frame}"
+            )
+
+        guard_interval = max(0.0, float(actionconfig.ACTION_PAUSE_GUARD_INTERVAL))
+        if guard_interval > 0:
+            time.sleep(guard_interval)
+
+        matched = self._pause_state_matches(
+            True,
+            "target action guard confirmation",
+            reads=reads,
+            stable_reads=stable_reads,
+        )
+        final_frame = self._read_frame()
+        if matched is not True or final_frame != target_frame:
+            raise PrecisePauseError(
+                f"Target pause was not stable before action: "
+                f"frame {final_frame} vs {target_frame}, paused={matched!r}"
+            )
+
+        with self._lock:
+            self._game_paused = True
+        logger.debug(f"Target frame sealed for action: frame={target_frame}, paused=True")
 
     @staticmethod
     def _preselect_pos(action: Action) -> tuple[float, float]:
@@ -485,6 +565,7 @@ class PlaybackController:
             self._wait_until(pause_frame, PlaybackPhase.WAITING_PAUSE)
             self._pause_game("precise-pause entry")
             self._frame_step_until(target_frame)
+            self._guard_target_pause(target_frame)
 
             self._set_phase(PlaybackPhase.EXECUTING)
             self._execute_input(action)

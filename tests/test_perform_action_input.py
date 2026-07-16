@@ -194,6 +194,41 @@ class PlaybackControllerTests(unittest.TestCase):
         self.assertEqual(clicks, [playback_controller.ratioconfig.PAUSE_BUTTON_RATIO])
         self.assertFalse(controller.game_paused)
 
+    def test_delayed_resume_image_does_not_toggle_back_to_pause(self):
+        from src.axis import playback_controller
+
+        controller = playback_controller.PlaybackController()
+        controller._game_paused = True
+        actual_paused = {"value": True}
+        stale_paused_reads = {"value": 0}
+        clicks = []
+
+        def click(_pos):
+            clicks.append(True)
+            actual_paused["value"] = not actual_paused["value"]
+            if not actual_paused["value"]:
+                stale_paused_reads["value"] = 2
+
+        def image_reports_paused():
+            if stale_paused_reads["value"] > 0:
+                stale_paused_reads["value"] -= 1
+                return True
+            return actual_paused["value"]
+
+        with (
+            patch.object(playback_controller.actionconfig, "PAUSE_TOGGLE_MIN_INTERVAL", 0.0),
+            patch.object(playback_controller.actionconfig, "PAUSE_VERIFY_READ_INTERVAL", 0.0),
+            patch.object(playback_controller.actionconfig, "RESUME_TOGGLE_SETTLE", 0.0),
+            patch.object(playback_controller, "mouseclick", side_effect=click),
+            patch.object(playback_controller, "_image_reports_paused", side_effect=image_reports_paused),
+            patch.object(playback_controller.time, "sleep", return_value=None),
+        ):
+            controller._resume_game("delayed resume image")
+
+        self.assertEqual(len(clicks), 1)
+        self.assertFalse(actual_paused["value"])
+        self.assertFalse(controller.game_paused)
+
     def test_pause_toggle_enforces_minimum_interval(self):
         from src.axis import playback_controller
 
@@ -340,6 +375,87 @@ class PlaybackControllerTests(unittest.TestCase):
             and item[1] == playback_controller.ratioconfig.PAUSE_BUTTON_RATIO
         ]
         self.assertGreaterEqual(len(pause_before_action), 2)
+
+    def test_delayed_pause_image_does_not_toggle_back_to_running(self):
+        from src.axis import playback_controller
+        from src.logic.action import ActionType
+
+        frame = {"value": 0}
+        paused = {"value": False}
+        stale_running_reads = {"value": 0}
+        clicks = []
+        executed = []
+
+        def advance_frame(*_args, **_kwargs):
+            frame["value"] += 1
+            return True
+
+        def click(pos):
+            clicks.append((frame["value"], pos))
+            if pos != playback_controller.ratioconfig.PAUSE_BUTTON_RATIO:
+                return
+            paused["value"] = not paused["value"]
+            if paused["value"]:
+                # A slower capture/recognition path can briefly report the
+                # running icon after the pause click has already succeeded.
+                stale_running_reads["value"] = 2
+
+        def image_reports_paused():
+            if stale_running_reads["value"] > 0:
+                stale_running_reads["value"] -= 1
+                return False
+            return paused["value"]
+
+        controller = playback_controller.PlaybackController()
+        with (
+            patch.object(playback_controller.actionconfig, "PAUSE_TOGGLE_MIN_INTERVAL", 0.0),
+            patch.object(playback_controller.actionconfig, "PAUSE_TOGGLE_SETTLE", 0.0),
+            patch.object(playback_controller.actionconfig, "PAUSE_VERIFY_READ_INTERVAL", 0.0),
+            patch.object(playback_controller.actionconfig, "ACTION_PAUSE_GUARD_INTERVAL", 0.0),
+            patch.object(playback_controller.actionconfig, "ACTION_RESUME_DELAY", 0.0),
+            patch.object(playback_controller.actionconfig, "RESUME_TOGGLE_SETTLE", 0.0),
+            patch.object(playback_controller.actionconfig, "MINIMUM_WAITTIME", 0.0),
+            patch.object(playback_controller, "get_game_time", side_effect=lambda: frame["value"]),
+            patch.object(playback_controller, "wait_for_game_time_update", side_effect=advance_frame),
+            patch.object(playback_controller, "_image_reports_paused", side_effect=image_reports_paused),
+            patch.object(playback_controller, "mouseclick", side_effect=click),
+            patch.object(
+                playback_controller,
+                "perform_skill",
+                side_effect=lambda _action: executed.append((frame["value"], paused["value"])),
+            ),
+            patch.object(playback_controller.time, "sleep", return_value=None),
+        ):
+            controller.execute(self._action(ActionType.SKILL))
+
+        pause_clicks = [
+            item for item in clicks
+            if item[1] == playback_controller.ratioconfig.PAUSE_BUTTON_RATIO
+        ]
+        # One initial pause, two clicks for each of five frame pulses, and one
+        # final resume. No image-retry click is allowed in between.
+        self.assertEqual(len(pause_clicks), 12)
+        self.assertEqual(executed, [(100, True)])
+        self.assertFalse(paused["value"])
+
+    def test_target_pause_guard_never_toggles_when_pause_is_lost(self):
+        from src.axis import playback_controller
+
+        controller = playback_controller.PlaybackController()
+        controller._game_paused = True
+        clicks = []
+
+        with (
+            patch.object(playback_controller.actionconfig, "PAUSE_VERIFY_READ_INTERVAL", 0.0),
+            patch.object(playback_controller, "get_game_time", return_value=100),
+            patch.object(playback_controller, "_image_reports_paused", return_value=False),
+            patch.object(playback_controller, "mouseclick", side_effect=lambda pos: clicks.append(pos)),
+            patch.object(playback_controller.time, "sleep", return_value=None),
+        ):
+            with self.assertRaises(playback_controller.PrecisePauseError):
+                controller._guard_target_pause(100)
+
+        self.assertEqual(clicks, [])
 
     def test_pause_request_at_target_keeps_game_paused(self):
         from src.axis import playback_controller
