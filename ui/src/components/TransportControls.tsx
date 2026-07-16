@@ -5,6 +5,8 @@ interface TransportControlsProps {
   isPlaying?: boolean
   isLoading?: boolean
   onRecord?: () => void
+  onResumeRecord?: () => void
+  canResumeRecord?: boolean
   onStop?: () => void
   onPlay?: () => void
   onStopPlay?: () => void
@@ -17,6 +19,8 @@ export function TransportControls({
   isPlaying = false,
   isLoading = false,
   onRecord,
+  onResumeRecord,
+  canResumeRecord = false,
   onStop,
   onPlay,
   onStopPlay,
@@ -25,17 +29,36 @@ export function TransportControls({
 }: TransportControlsProps) {
   const busy = isRecording || isPlaying
   const disabled = isLoading
+  const resumeDisabled = disabled || busy || !canResumeRecord
 
   return (
-    <div className={`flex items-center ${compact ? 'gap-3' : 'gap-5'}`}>
+    <div className={`flex items-center ${compact ? 'gap-2' : 'gap-5'}`}>
       {/* Record — disabled when loading or recording/playing */}
       <button
         onClick={onRecord}
         disabled={disabled || busy}
-        title={isLoading ? '初始化中…' : isRecording ? '录制中' : '开始录制'}
+        title={isLoading ? '初始化中…' : isRecording ? '录制中' : '开始新录制（不使用续录偏移）'}
         className={disabled || busy ? 'opacity-30 cursor-not-allowed' : 'hover:opacity-80'}
       >
         <Record className="w-3 h-3" />
+      </button>
+
+      {/* Resume recording is deliberately separate from fresh recording. */}
+      <button
+        onClick={onResumeRecord}
+        disabled={resumeDisabled}
+        title={
+          isLoading
+            ? '初始化中…'
+            : !canResumeRecord
+              ? '请先选择时间轴并设置大于 0 的续录偏移'
+              : '续录（使用当前偏移并合并原轴）'
+        }
+        className={resumeDisabled ? 'cursor-not-allowed opacity-30' : 'hover:opacity-80'}
+      >
+        <span className="rounded border border-accent-yellow/60 px-1 py-0.5 text-[10px] font-semibold leading-none text-accent-yellow">
+          续录
+        </span>
       </button>
 
       {/* Stop — stops recording or playback, whichever is active */}

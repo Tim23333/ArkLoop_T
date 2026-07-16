@@ -2,6 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from recorder.backend import _RecordingFrameGate
 from src.input.action_recorder import ActionRecorder
 from src.input.coordinate_mapper import MappedCoordinates
 from src.input.mouse_listener import MouseEvent, MouseListener
@@ -43,6 +44,32 @@ class RecordingFrameCaptureTests(unittest.TestCase):
 
         self.assertEqual(actions[0]["start_frame"], 200)
         self.assertEqual(actions[0]["end_frame"], 203)
+
+
+class RecordingFrameGateTests(unittest.TestCase):
+    def test_fresh_recording_ignores_previous_battle_until_reset(self):
+        gate = _RecordingFrameGate(248, resume=False)
+
+        self.assertFalse(gate.observe(249))
+        self.assertFalse(gate.observe(252))
+        self.assertTrue(gate.observe(0))
+        self.assertTrue(gate.observe(8))
+
+    def test_fresh_recording_accepts_early_current_battle_frame(self):
+        gate = _RecordingFrameGate(12, resume=False)
+
+        self.assertTrue(gate.observe(13))
+
+    def test_large_frame_drop_detects_reset_even_if_zero_was_missed(self):
+        gate = _RecordingFrameGate(248, resume=False)
+
+        self.assertFalse(gate.observe(251))
+        self.assertTrue(gate.observe(17))
+
+    def test_resume_recording_keeps_current_high_frame(self):
+        gate = _RecordingFrameGate(248, resume=True)
+
+        self.assertTrue(gate.observe(249))
 
 
 if __name__ == "__main__":

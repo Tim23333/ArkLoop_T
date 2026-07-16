@@ -45,8 +45,10 @@ export default function App() {
     setPinnedTimelines,
     getWindowBounds,
     setBounds,
+    beginWindowDrag,
     setOverlayMode,
     setOverlayLocked,
+    setOverlayOpacity,
     startPlayback,
     stopPlayback,
     pausePlayback,
@@ -180,63 +182,72 @@ export default function App() {
   const [recognizerState, setRecognizerState] = useState<RecognizerState>({})
   const [isCompactOverlay, setCompactOverlay] = useState(false)
   const [isOverlayLocked, setOverlayLockedState] = useState(false)
+  const [overlayOpacity, setOverlayOpacityState] = useState(0.82)
   const [overlayError, setOverlayError] = useState('')
 
-  const handleRecord = useCallback(async () => {
+  const startRecordSession = useCallback(async (resume: boolean) => {
+    const resumeTarget = resume ? selectedTimeline : ''
+    const resumeOffset = resume ? frameOffset : 0
+    if (resume && (!resumeTarget || resumeOffset <= 0)) return
+
     try {
       const mapCode = timelineSettings.map_code ?? '1-7'
-      // Decide append-vs-fresh BEFORE calling backend so the offset is
-      // consistent. If a timeline is loaded and either (a) a previous session
-      // left a non-zero cycle offset or (b) the timeline already has actions,
-      // treat the new recording as a continuation that appends to the same
-      // timeline. This supports the "record after playback" flow where the
-      // user wants to keep adding actions to the existing axis.
-      const isResume = !!selectedTimeline && (isCompactOverlay || frameOffset > 0 || loadedAxis.length > 0)
-      if (isResume) setAppendingTo(selectedTimeline)
-      else setAppendingTo('')
       await startRecording(
         mapCode,
         timelineSettings.max_tick,
-        frameOffset,
-        isResume ? recognizerState : {},
+        resumeOffset,
+        resume ? recognizerState : {},
         timelineSettings.devices,
       )
+      setAppendingTo(resumeTarget)
+      if (!resume) {
+        // The normal Record button is always a fresh session, even when a
+        // pause/manual offset is still visible in the toolbar.
+        setFrameOffset(0)
+        setRecognizerState({})
+      }
       setIsRecording(true)
     } catch (e) {
+      setAppendingTo('')
       console.error(e)
     }
-  }, [startRecording, timelineSettings, frameOffset, selectedTimeline, loadedAxis.length, recognizerState, isCompactOverlay])
+  }, [startRecording, timelineSettings, frameOffset, selectedTimeline, recognizerState])
+
+  const handleRecord = useCallback(() => {
+    void startRecordSession(false)
+  }, [startRecordSession])
+
+  const handleResumeRecord = useCallback(() => {
+    void startRecordSession(true)
+  }, [startRecordSession])
 
   const handleStop = useCallback(async () => {
     try {
       const axis = await stopRecording()
       setIsRecording(false)
       const newActions = axis ?? []
-      if (appendingTo) {
-        // Resume-record flow: silently append into the original timeline.
-        await appendToTimeline(appendingTo, newActions)
-        setLoadedAxis((prev) => [...prev, ...newActions])
-        setAppendingTo('')
-        setFrameOffset(0)
-        setRecognizerState({})
-      } else {
-        if (isCompactOverlay) {
-          const result = await setOverlayMode(false)
-          if (result.ok) {
-            setCompactOverlay(false)
-            setOverlayLockedState(false)
-          } else {
-            setOverlayError(result.error ?? '无法打开保存页面')
-            return
-          }
+      const actionsForSave = appendingTo
+        ? [...loadedAxis, ...newActions].sort((a, b) => compareActionTime(a, b))
+        : newActions
+      if (isCompactOverlay) {
+        const result = await setOverlayMode(false)
+        if (!result.ok) {
+          // Still switch the React view so the user is never left without the
+          // save dialog merely because native window restoration failed.
+          setOverlayError(result.error ?? '窗口恢复失败，请保存后重新打开程序')
         }
-        setPendingAxis(newActions)
-        setShowSaveDialog(true)
+        setCompactOverlay(false)
+        setOverlayLockedState(false)
       }
+      setAppendingTo('')
+      setFrameOffset(0)
+      setRecognizerState({})
+      setPendingAxis(actionsForSave)
+      setShowSaveDialog(true)
     } catch (e) {
       console.error(e)
     }
-  }, [stopRecording, appendingTo, appendToTimeline, isCompactOverlay, setOverlayMode])
+  }, [stopRecording, appendingTo, isCompactOverlay, setOverlayMode, loadedAxis])
 
   const handlePauseRecord = useCallback(async () => {
     try {
@@ -506,12 +517,19 @@ export default function App() {
           source?: string
           frame?: number
           state?: RecognizerState
+          playback?: { phase?: string }
         }
       }
       if (ev?.event_type === 'playback_done') {
         setIsPlaying(false)
-        if (typeof ev.data?.frame === 'number') setFrameOffset(ev.data.frame)
-        if (ev.data?.state) setRecognizerState(ev.data.state as RecognizerState)
+        // A normal completion belongs to the run that just ended; its final WS
+        // frame must not turn the next battle into a resume. Explicit pauses
+        // emit a separate `paused` event and are the only path that keeps the
+        // offset/state for continuation.
+        if (ev.data?.playback?.phase !== 'paused') {
+          setFrameOffset(0)
+          setRecognizerState({})
+        }
       } else if (ev?.event_type === 'paused') {
         if (ev.data?.source === 'playback') setIsPlaying(false)
         if (ev.data?.source === 'recording') setIsRecording(false)
@@ -525,6 +543,9 @@ export default function App() {
         const modeData = ev.data as { enabled?: boolean; locked?: boolean }
         setCompactOverlay(Boolean(modeData?.enabled))
         setOverlayLockedState(Boolean(modeData?.locked))
+      } else if (ev?.event_type === 'overlay_opacity_changed') {
+        const opacityData = ev.data as { opacity?: number }
+        if (typeof opacityData?.opacity === 'number') setOverlayOpacityState(opacityData.opacity)
       }
     }
     return () => { window.__onBackendEvent = prev }
@@ -571,6 +592,7 @@ export default function App() {
     if (result.ok) {
       setCompactOverlay(true)
       setOverlayLockedState(false)
+      if (typeof result.opacity === 'number') setOverlayOpacityState(result.opacity)
     } else {
       setOverlayError(result.error ?? '无法切换展示模式')
     }
@@ -597,13 +619,23 @@ export default function App() {
     }
   }, [isOverlayLocked, setOverlayLocked])
 
+  const handleOverlayOpacityChange = useCallback(async (opacity: number) => {
+    setOverlayOpacityState(opacity)
+    const result = await setOverlayOpacity(opacity)
+    if (!result.ok) {
+      setOverlayError(result.error ?? '无法调整透明度')
+      return
+    }
+    if (typeof result.opacity === 'number') setOverlayOpacityState(result.opacity)
+  }, [setOverlayOpacity])
+
   // ── displayed axis ───────────────────────────────────────────
   const displayedAxis = useMemo(() => {
     if (isRecording) {
-      // When resuming a recording (frameOffset > 0), merge previously saved
+      // When the explicit Resume Record button started this session, merge saved
       // actions with the live backend stream so the timeline shows the full
       // axis instead of only the current recording session.
-      if (frameOffset > 0 && loadedAxis.length > 0) {
+      if (appendingTo && loadedAxis.length > 0) {
         return [...loadedAxis, ...backendAxis]
       }
       return backendAxis
@@ -616,7 +648,7 @@ export default function App() {
       return loadedAxis.map((a) => ({ ...a, frame: (a.frame ?? 0) - frameOffset }))
     }
     return loadedAxis
-  }, [isRecording, isPlaying, backendAxis, loadedAxis, frameOffset])
+  }, [isRecording, isPlaying, backendAxis, loadedAxis, frameOffset, appendingTo])
 
   // Unique operator names deployed in the current timeline, in first-seen
   // order.  Derived from displayedAxis so it updates live during recording
@@ -675,19 +707,24 @@ export default function App() {
         wsConnected={wsConnected}
         frameOffset={frameOffset}
         isRecording={isRecording}
+        isResumeRecording={Boolean(appendingTo)}
         isPlaying={isPlaying}
         isLoading={isLoading}
         locked={isOverlayLocked}
+        opacity={overlayOpacity}
         lockError={overlayError}
         actions={displayedAxis}
         breakpoints={breakpoints}
         getAvatarUrl={getAvatarUrl}
         onRecord={handleRecord}
+        onResumeRecord={handleResumeRecord}
+        canResumeRecord={Boolean(selectedTimeline) && frameOffset > 0}
         onStop={handleStop}
         onPlay={handlePlay}
         onStopPlay={handleStopPlay}
         onPause={handlePause}
         onToggleLock={handleToggleOverlayLock}
+        onOpacityChange={handleOverlayOpacityChange}
         onRestore={handleRestoreFullView}
         onAddAction={handleAddAction}
         onEditAction={handleEditAction}
@@ -695,8 +732,7 @@ export default function App() {
         onDeleteAction={handleDeleteAction}
         onAddBreakpoint={handleAddBreakpoint}
         onRemoveBreakpoint={handleRemoveBreakpoint}
-        getWindowBounds={getWindowBounds}
-        setBounds={setBounds}
+        onBeginDrag={beginWindowDrag}
       />
     )
   }
@@ -863,6 +899,8 @@ export default function App() {
           getAvatarUrl={getAvatarUrl}
           isLoading={isLoading}
           onRecord={handleRecord}
+          onResumeRecord={handleResumeRecord}
+          canResumeRecord={Boolean(selectedTimeline) && frameOffset > 0}
           onStop={handleStop}
           onPlay={handlePlay}
           onStopPlay={handleStopPlay}

@@ -15,14 +15,18 @@ _WS_EX_LAYERED = 0x00080000
 _WS_EX_NOACTIVATE = 0x08000000
 _SWP_NOSIZE = 0x0001
 _SWP_NOMOVE = 0x0002
+_SWP_NOZORDER = 0x0004
 _SWP_NOACTIVATE = 0x0010
 _SWP_FRAMECHANGED = 0x0020
+_SWP_SHOWWINDOW = 0x0040
 _HWND_TOPMOST = -1
 
 _MOD_CONTROL = 0x0002
 _MOD_ALT = 0x0001
 _MOD_NOREPEAT = 0x4000
 _WM_HOTKEY = 0x0312
+_WM_NCLBUTTONDOWN = 0x00A1
+_HTCAPTION = 2
 _PM_REMOVE = 0x0001
 _UNLOCK_HOTKEY_ID = 0xA710
 
@@ -48,6 +52,7 @@ class WindowOverlayController:
         self._normal_window_state: Any = None
         self._normal_minimum_size: Optional[tuple[int, int]] = None
         self._normal_opacity: Optional[float] = None
+        self._overlay_opacity = 0.82
         self._unlocked_ex_style: Optional[int] = None
 
         self._hotkey_stop = threading.Event()
@@ -69,6 +74,7 @@ class WindowOverlayController:
             "locked": self._locked,
             "hotkey_available": self.hotkey_available,
             "hotkey": "Ctrl+Alt+L",
+            "opacity": self._overlay_opacity,
         }
 
     @property
@@ -95,8 +101,7 @@ class WindowOverlayController:
                 self._overlay_enabled = False
                 bounds = self._normal_bounds
                 if bounds:
-                    self.window.resize(bounds["width"], bounds["height"])
-                    self.window.move(bounds["x"], bounds["y"])
+                    self._restore_normal_bounds(bounds)
                 self._restore_normal_window_state()
 
             result = {"ok": True, **self.state}
@@ -168,6 +173,53 @@ class WindowOverlayController:
             self._push_event("overlay_lock_changed", result)
             return result
 
+    def set_opacity(self, opacity: float) -> Dict[str, Any]:
+        """Set compact-overlay opacity, clamped to a readable range."""
+        try:
+            normalized = float(opacity)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "透明度必须是数字", **self.state}
+        normalized = max(0.35, min(1.0, normalized))
+        with self._mode_lock:
+            self._overlay_opacity = normalized
+            if self._overlay_enabled:
+                def apply() -> None:
+                    self.window.native.Opacity = normalized
+
+                self._invoke_native(apply)
+            result = {"ok": True, **self.state}
+            self._push_event("overlay_opacity_changed", result)
+            return result
+
+    def begin_drag(self) -> Dict[str, Any]:
+        """Hand compact-window dragging to Windows' native move loop."""
+        with self._mode_lock:
+            if not self._overlay_enabled:
+                return {"ok": False, "error": "当前不是迷你展示模式"}
+            if self._locked:
+                return {"ok": False, "error": "请先解锁迷你窗口"}
+
+            hwnd = self._get_hwnd()
+            if not hwnd:
+                return {"ok": False, "error": "未找到 ArkLoop 窗口句柄"}
+
+            def drag() -> None:
+                user32 = ctypes.windll.user32
+                user32.ReleaseCapture.argtypes = []
+                user32.ReleaseCapture.restype = wintypes.BOOL
+                user32.SendMessageW.argtypes = [
+                    wintypes.HWND,
+                    ctypes.c_uint,
+                    wintypes.WPARAM,
+                    wintypes.LPARAM,
+                ]
+                user32.SendMessageW.restype = ctypes.c_ssize_t
+                user32.ReleaseCapture()
+                user32.SendMessageW(hwnd, _WM_NCLBUTTONDOWN, _HTCAPTION, 0)
+
+            self._invoke_native(drag)
+            return {"ok": True}
+
     def stop(self) -> None:
         """Release click-through and unregister the process-wide hotkey."""
         try:
@@ -199,6 +251,67 @@ class WindowOverlayController:
             except Exception:
                 return 0
 
+    def set_bounds(self, x: int, y: int, width: int, height: int) -> None:
+        """Move and resize the native window using logical-pixel bounds."""
+        self._set_native_bounds(
+            {
+                "x": int(x),
+                "y": int(y),
+                "width": max(1, int(width)),
+                "height": max(1, int(height)),
+            }
+        )
+
+    def _restore_normal_bounds(self, bounds: Dict[str, int]) -> None:
+        self._set_native_bounds(bounds)
+
+    def _set_native_bounds(self, bounds: Dict[str, int]) -> None:
+        """Apply geometry without pywebview's broken WinForms move().
+
+        pywebview 5's WinForms ``move`` implementation passes ``None`` for the
+        integer width/height parameters of ``SetWindowPos``. ctypes rejects
+        those values before Win32 can honor ``SWP_NOSIZE``. Apply position and
+        size atomically with explicit physical-pixel integers instead.
+        """
+        hwnd = self._get_hwnd()
+        if not hwnd:
+            raise RuntimeError("未找到 ArkLoop 窗口句柄，无法恢复窗口位置")
+
+        user32 = ctypes.windll.user32
+        user32.GetDpiForWindow.argtypes = [wintypes.HWND]
+        user32.GetDpiForWindow.restype = ctypes.c_uint
+        user32.SetWindowPos.argtypes = [
+            wintypes.HWND,
+            wintypes.HWND,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint,
+        ]
+        user32.SetWindowPos.restype = wintypes.BOOL
+
+        dpi = int(user32.GetDpiForWindow(hwnd) or 96)
+        scale = dpi / 96.0
+        x = round(int(bounds["x"]) * scale)
+        y = round(int(bounds["y"]) * scale)
+        width = max(1, round(int(bounds["width"]) * scale))
+        height = max(1, round(int(bounds["height"]) * scale))
+
+        ctypes.set_last_error(0)
+        restored = user32.SetWindowPos(
+            hwnd,
+            wintypes.HWND(0),
+            x,
+            y,
+            width,
+            height,
+            _SWP_NOZORDER | _SWP_NOACTIVATE | _SWP_FRAMECHANGED | _SWP_SHOWWINDOW,
+        )
+        if not restored:
+            error_code = ctypes.get_last_error()
+            raise OSError(error_code, "恢复 ArkLoop 窗口位置和尺寸失败")
+
     def _invoke_native(self, callback: Callable[[], None]) -> None:
         native = getattr(self.window, "native", None)
         if native is None:
@@ -227,7 +340,7 @@ class WindowOverlayController:
             native.MinimumSize = Size(360, 110)
             native.FormBorderStyle = getattr(WinForms.FormBorderStyle, "None")
             native.TopMost = True
-            native.Opacity = 0.82
+            native.Opacity = self._overlay_opacity
 
         self._invoke_native(apply)
 

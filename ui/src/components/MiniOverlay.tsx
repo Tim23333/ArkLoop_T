@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import type { PointerEvent as ReactPointerEvent } from 'react'
 import { Timeline } from './Timeline'
 import { formatGameTime } from '../utils/timeline'
 import type { ActionRow, AxisAction, AxisBlock } from '../types'
@@ -10,19 +10,24 @@ interface MiniOverlayProps {
   wsConnected: boolean
   frameOffset: number
   isRecording: boolean
+  isResumeRecording: boolean
   isPlaying: boolean
   isLoading: boolean
   locked: boolean
+  opacity: number
   lockError?: string
   actions: AxisAction[]
   breakpoints: number[]
   getAvatarUrl: (oper: string) => Promise<string>
   onRecord: () => void
+  onResumeRecord: () => void
+  canResumeRecord: boolean
   onStop: () => void
   onPlay: () => void
   onStopPlay: () => void
   onPause: () => void
   onToggleLock: () => void
+  onOpacityChange: (opacity: number) => void
   onRestore: () => void
   onAddAction: (row: ActionRow, frame: number) => void
   onEditAction: (block: AxisBlock) => void
@@ -30,8 +35,7 @@ interface MiniOverlayProps {
   onDeleteAction: (block: AxisBlock) => void
   onAddBreakpoint: (frame: number) => void
   onRemoveBreakpoint: (frame: number) => void
-  getWindowBounds: () => Promise<{ x: number; y: number; width: number; height: number }>
-  setBounds: (x: number, y: number, width: number, height: number) => Promise<void> | void
+  onBeginDrag: () => Promise<unknown> | void
 }
 
 export function MiniOverlay({
@@ -41,19 +45,24 @@ export function MiniOverlay({
   wsConnected,
   frameOffset,
   isRecording,
+  isResumeRecording,
   isPlaying,
   isLoading,
   locked,
+  opacity,
   lockError,
   actions,
   breakpoints,
   getAvatarUrl,
   onRecord,
+  onResumeRecord,
+  canResumeRecord,
   onStop,
   onPlay,
   onStopPlay,
   onPause,
   onToggleLock,
+  onOpacityChange,
   onRestore,
   onAddAction,
   onEditAction,
@@ -61,49 +70,19 @@ export function MiniOverlay({
   onDeleteAction,
   onAddBreakpoint,
   onRemoveBreakpoint,
-  getWindowBounds,
-  setBounds,
+  onBeginDrag,
 }: MiniOverlayProps) {
-  const [dragging, setDragging] = useState(false)
-  const dragStart = useRef({ mouseX: 0, mouseY: 0, x: 0, y: 0, width: 0, height: 0 })
-
-  const beginDrag = async (event: React.MouseEvent) => {
+  const beginDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (locked || event.button !== 0) return
     const target = event.target as HTMLElement
     if (target.closest('button, input')) return
     event.preventDefault()
-    const bounds = await getWindowBounds()
-    dragStart.current = {
-      mouseX: (window.screenX ?? 0) + event.clientX,
-      mouseY: (window.screenY ?? 0) + event.clientY,
-      ...bounds,
-    }
-    setDragging(true)
+    void onBeginDrag()
   }
 
-  useEffect(() => {
-    if (!dragging) return
-    const move = (event: MouseEvent) => {
-      const start = dragStart.current
-      const mouseX = (window.screenX ?? 0) + event.clientX
-      const mouseY = (window.screenY ?? 0) + event.clientY
-      void setBounds(
-        Math.round(start.x + mouseX - start.mouseX),
-        Math.round(start.y + mouseY - start.mouseY),
-        start.width,
-        start.height,
-      )
-    }
-    const end = () => setDragging(false)
-    window.addEventListener('mousemove', move)
-    window.addEventListener('mouseup', end)
-    return () => {
-      window.removeEventListener('mousemove', move)
-      window.removeEventListener('mouseup', end)
-    }
-  }, [dragging, setBounds])
-
-  const status = isRecording ? '录轴中' : isPlaying ? '播放中' : '已就绪'
+  const status = isRecording
+    ? (isResumeRecording ? '续录中' : '录轴中')
+    : isPlaying ? '播放中' : '已就绪'
   const statusClass = isRecording
     ? 'text-[#ff6b67]'
     : isPlaying
@@ -112,7 +91,10 @@ export function MiniOverlay({
 
   return (
     <div className="mini-overlay-shell">
-      <div className="mini-overlay-header" onMouseDown={beginDrag}>
+      <div
+        className="mini-overlay-header"
+        onPointerDown={beginDrag}
+      >
         <div className="flex min-w-0 items-center gap-2">
           <span className={`h-1.5 w-1.5 rounded-full ${isRecording ? 'bg-accent-red animate-pulse' : isPlaying ? 'bg-accent-green animate-pulse' : 'bg-white/40'}`} />
           <span className={`text-[11px] font-semibold tracking-[0.12em] ${statusClass}`}>{status}</span>
@@ -153,11 +135,29 @@ export function MiniOverlay({
           </div>
         </div>
 
+        {!locked && (
+          <label className="ml-auto flex items-center gap-2 text-[10px] tracking-wide text-white/55">
+            <span>透明度</span>
+            <input
+              type="range"
+              min={35}
+              max={100}
+              step={1}
+              value={Math.round(opacity * 100)}
+              onChange={(event) => onOpacityChange(Number(event.target.value) / 100)}
+              className="h-1.5 w-32 cursor-pointer accent-[#49B8FF]"
+              title="调整迷你窗口透明度"
+            />
+            <span className="w-8 text-right font-mono text-white/75">{Math.round(opacity * 100)}%</span>
+          </label>
+        )}
+
       </div>
 
-      <div className="flex min-h-0 flex-1 border-t border-white/10">
+      <div className="flex w-full min-w-0 min-h-0 flex-1 border-t border-white/10">
         <Timeline
           overlay
+          followCurrentFrame={wsConnected}
           actions={actions}
           recording={isRecording}
           playing={isPlaying}
@@ -166,6 +166,8 @@ export function MiniOverlay({
           getAvatarUrl={getAvatarUrl}
           isLoading={isLoading}
           onRecord={onRecord}
+          onResumeRecord={onResumeRecord}
+          canResumeRecord={canResumeRecord}
           onStop={onStop}
           onPlay={onPlay}
           onStopPlay={onStopPlay}

@@ -99,8 +99,10 @@ export interface PyWebviewApi {
   set_pinned_timelines: (pinned: string[]) => Promise<boolean>
   get_window_bounds: () => Promise<{ x: number; y: number; width: number; height: number }>
   set_bounds: (x: number, y: number, width: number, height: number) => Promise<void>
+  begin_window_drag: () => Promise<{ ok: boolean; error?: string }>
   set_overlay_mode: (enabled: boolean) => Promise<OverlayState>
   set_overlay_locked: (locked: boolean) => Promise<OverlayState>
+  set_overlay_opacity: (opacity: number) => Promise<OverlayState>
   start_playback: (name: string, frameOffset?: number, breakpoints?: number[]) => Promise<boolean>
   stop_playback: () => Promise<void>
   pause_playback: () => Promise<{ ok: boolean }>
@@ -123,6 +125,7 @@ export interface OverlayState {
   locked?: boolean
   hotkey_available?: boolean
   hotkey?: string
+  opacity?: number
   error?: string
 }
 
@@ -384,6 +387,11 @@ export function useBackend() {
     return api.set_bounds(x, y, width, height)
   }, [api])
 
+  const beginWindowDrag = useCallback(async () => {
+    if (!api) return { ok: false, error: 'pywebview.api not available' }
+    return api.begin_window_drag()
+  }, [api])
+
   const setOverlayMode = useCallback(async (enabled: boolean) => {
     if (!api) return { ok: false, error: 'pywebview.api not available' } as OverlayState
     return api.set_overlay_mode(enabled)
@@ -392,6 +400,11 @@ export function useBackend() {
   const setOverlayLocked = useCallback(async (locked: boolean) => {
     if (!api) return { ok: false, error: 'pywebview.api not available' } as OverlayState
     return api.set_overlay_locked(locked)
+  }, [api])
+
+  const setOverlayOpacity = useCallback(async (opacity: number) => {
+    if (!api) return { ok: false, error: 'pywebview.api not available' } as OverlayState
+    return api.set_overlay_opacity(opacity)
   }, [api])
 
   const startPlayback = useCallback(
@@ -497,8 +510,10 @@ export function useBackend() {
     setPinnedTimelines,
     getWindowBounds,
     setBounds,
+    beginWindowDrag,
     setOverlayMode,
     setOverlayLocked,
+    setOverlayOpacity,
     startPlayback,
     stopPlayback,
     pausePlayback,

@@ -16,6 +16,8 @@ interface TimelineProps {
   getAvatarUrl?: (oper: string) => Promise<string>
   isLoading?: boolean
   onRecord?: () => void
+  onResumeRecord?: () => void
+  canResumeRecord?: boolean
   onStop?: () => void
   onPlay?: () => void
   onStopPlay?: () => void
@@ -27,6 +29,7 @@ interface TimelineProps {
   onAddBreakpoint?: (frame: number) => void
   onRemoveBreakpoint?: (frame: number) => void
   overlay?: boolean
+  followCurrentFrame?: boolean
 }
 
 type ContextMenuState =
@@ -36,7 +39,6 @@ type ContextMenuState =
 
 const TOP_BAR_HEIGHT = 43
 const ROW_COUNT = 3
-const PLAYHEAD_VIEWPORT_X = 160
 const CHUNK_FRAMES = 300  // pre-render 300 frames at a time
 
 export function Timeline({
@@ -48,6 +50,8 @@ export function Timeline({
   getAvatarUrl,
   isLoading = false,
   onRecord,
+  onResumeRecord,
+  canResumeRecord = false,
   onStop,
   onPlay,
   onStopPlay,
@@ -59,12 +63,14 @@ export function Timeline({
   onAddBreakpoint,
   onRemoveBreakpoint,
   overlay = false,
+  followCurrentFrame = false,
 }: TimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [containerHeight, setContainerHeight] = useState(0)
   const [isPanning, setIsPanning] = useState(false)
   const panStart = useRef({ x: 0, scrollLeft: 0 })
   const liveMode = recording || playing
+  const followMode = liveMode || followCurrentFrame
 
   const [selectedBlockKey, setSelectedBlockKey] = useState<string | null>(null)
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
@@ -74,22 +80,41 @@ export function Timeline({
   const [dragX, setDragX] = useState(0)
 
   const [scrollChunks, setScrollChunks] = useState(1)
+  const normalizedCurrentFrame = Math.max(0, Math.floor(Number(currentFrame) || 0))
 
   // Pre-render in chunks of CHUNK_FRAMES so the layout memo stays stable.
-  const liveChunkFrame = liveMode
-    ? (Math.floor(currentFrame / CHUNK_FRAMES) + 2) * CHUNK_FRAMES
+  const liveChunkFrame = followMode
+    ? (Math.floor(normalizedCurrentFrame / CHUNK_FRAMES) + 2) * CHUNK_FRAMES
     : 0
   const extendToFrame = Math.max(scrollChunks * CHUNK_FRAMES, liveChunkFrame)
 
   const { ticks, blocks, totalWidth } = useTimelineLayout(actions, {}, extendToFrame)
 
-  const playheadTick = ticks.find((t) => t.frame === currentFrame)
+  const playheadTick = ticks.find((t) => t.frame === normalizedCurrentFrame)
   const playheadContentX = playheadTick?.x ?? 0
 
-  useEffect(() => {
-    if (!liveMode || !scrollRef.current) return
-    scrollRef.current.scrollLeft = Math.max(0, playheadContentX - PLAYHEAD_VIEWPORT_X)
-  }, [currentFrame, liveMode, playheadContentX])
+  // Keep the live playhead at roughly one third of the visible viewport.
+  // A layout effect plus one animation-frame retry is intentional: compact
+  // overlay mode resizes the native window at the same time React mounts the
+  // timeline, so the first clientWidth/scrollWidth can still be stale.
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    if (!followMode || !el || !playheadTick) return
+
+    const followPlayhead = () => {
+      const anchorX = Math.min(240, Math.max(110, el.clientWidth * 0.34))
+      const maxScrollLeft = Math.max(0, el.scrollWidth - el.clientWidth)
+      const targetScrollLeft = Math.min(
+        maxScrollLeft,
+        Math.max(0, playheadContentX - anchorX),
+      )
+      el.scrollLeft = targetScrollLeft
+    }
+
+    followPlayhead()
+    const animationFrame = window.requestAnimationFrame(followPlayhead)
+    return () => window.cancelAnimationFrame(animationFrame)
+  }, [followMode, normalizedCurrentFrame, playheadContentX, playheadTick, totalWidth, overlay])
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
@@ -228,14 +253,14 @@ export function Timeline({
   return (
     <div
       className={[
-        'relative flex-1 min-h-[180px] flex select-none outline-none',
+        'relative w-full min-w-0 flex-1 min-h-[180px] flex select-none outline-none',
         overlay ? 'bg-black/10' : 'bg-gradient-to-br from-timeline-bg to-timeline-bg-end',
       ].join(' ')}
       tabIndex={-1}
     >
       <div className={[
         'shrink-0 flex flex-col z-20 border-r border-grid-light',
-        overlay ? 'w-[116px] bg-black/15' : 'w-timeline-left bg-gradient-to-br from-timeline-bg to-timeline-bg-end',
+        overlay ? 'w-[138px] bg-black/15' : 'w-timeline-left bg-gradient-to-br from-timeline-bg to-timeline-bg-end',
       ].join(' ')}>
         <div className={[
           'h-[43px] shrink-0 flex items-center border-b border-grid-light',
@@ -246,6 +271,8 @@ export function Timeline({
             isPlaying={playing}
             isLoading={isLoading}
             onRecord={onRecord}
+            onResumeRecord={onResumeRecord}
+            canResumeRecord={canResumeRecord}
             onStop={onStop}
             onPlay={onPlay}
             onStopPlay={onStopPlay}
@@ -268,7 +295,8 @@ export function Timeline({
 
       <div
         ref={scrollRef}
-        className="flex-1 overflow-x-auto overflow-y-hidden relative"
+        data-testid="timeline-scroll-viewport"
+        className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden relative"
         style={{ cursor: draggingBlock ? 'grabbing' : (isPanning ? 'grabbing' : (liveMode ? 'default' : 'grab')) }}
         onScroll={handleScroll}
         onMouseDown={startPan}

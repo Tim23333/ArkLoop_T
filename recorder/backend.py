@@ -56,6 +56,8 @@ __all__ = [
 
 # Number of operator card slots across the bottom deploy area.
 NUM_OPERATOR_SLOTS = 12
+STALE_BATTLE_FRAME_THRESHOLD = 30
+FRAME_RESET_DROP_THRESHOLD = 15
 
 
 class SlotAvatarMatcher:
@@ -78,6 +80,40 @@ def resolve_max_tick(max_tick: Optional[int]) -> int:
     if max_tick is not None:
         return max_tick
     return 30
+
+
+class _RecordingFrameGate:
+    """Reject input frames from the previous battle before a fresh reset.
+
+    The WS source keeps publishing the previous battle's final frame while the
+    next battle is loading. Fresh recording is allowed to start during that
+    interval, but those stale frames must not be treated as a resume or emitted
+    into the new axis. Resume sessions deliberately bypass this gate.
+    """
+
+    def __init__(self, initial_frame: int, *, resume: bool) -> None:
+        self._last_frame = max(0, int(initial_frame or 0))
+        self.waiting_for_reset = (
+            not resume and self._last_frame > STALE_BATTLE_FRAME_THRESHOLD
+        )
+
+    def observe(self, frame: int) -> bool:
+        """Observe a WS frame and return whether recording frames are valid."""
+        current = max(0, int(frame or 0))
+        if self.waiting_for_reset:
+            reset_seen = (
+                current <= 1
+                or self._last_frame - current >= FRAME_RESET_DROP_THRESHOLD
+            )
+            if reset_seen:
+                self.waiting_for_reset = False
+                logger.info(
+                    "[recording] detected new battle frame reset: %s -> %s",
+                    self._last_frame,
+                    current,
+                )
+        self._last_frame = current
+        return not self.waiting_for_reset
 
 
 class AxisBuilder:
@@ -234,6 +270,7 @@ class ActionBackend:
         self.analysis_worker: Any = None
         self.action_worker: Optional[ActionWorker] = None
         self.recorder: Optional[ActionRecorder] = None
+        self._frame_gate: Optional[_RecordingFrameGate] = None
 
         self._running = False
         self._stop_event = threading.Event()
@@ -311,6 +348,15 @@ class ActionBackend:
         # Mouse recorder
         try:
             ws = get_ws_time_source()
+            self._frame_gate = _RecordingFrameGate(
+                ws.get_game_time(),
+                resume=self.frame_offset > 0,
+            )
+            if self._frame_gate.waiting_for_reset:
+                logger.info(
+                    "[recording] previous battle frame is still active; "
+                    "waiting for WS frame reset before accepting actions"
+                )
             self.recorder = ActionRecorder(
                 debug=self._mouse_debug,
                 frame_provider=ws.get_game_time,
@@ -515,6 +561,15 @@ class ActionBackend:
                             if recorded_frame is not None
                             else ws.get_game_time()
                         )
+                        if (
+                            self._frame_gate is not None
+                            and not self._frame_gate.observe(ws_frame)
+                        ):
+                            logger.debug(
+                                "[recording] ignored pre-reset action at stale frame %s",
+                                ws_frame,
+                            )
+                            continue
                         fc, game_time, mem_ok = ws.latest()
                         tick_state = {
                             "frame": int(ws_frame),
@@ -534,6 +589,11 @@ class ActionBackend:
                     )
 
                 last_action_count = len(actions)
+                if self._frame_gate is not None:
+                    try:
+                        self._frame_gate.observe(get_ws_time_source().get_game_time())
+                    except Exception:
+                        pass
                 time.sleep(0.01)
             except Exception:
                 logger.exception("Error in action backend run loop")

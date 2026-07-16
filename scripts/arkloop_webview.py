@@ -770,11 +770,9 @@ class ArkLoopApi:
     def set_bounds(self, x: int, y: int, width: int, height: int) -> None:
         """Move and resize the window (used by custom resize handles)."""
         try:
-            if width > 0 and height > 0:
-                self.window.resize(int(width), int(height))
-            self.window.move(int(x), int(y))
+            self.window_overlay.set_bounds(x, y, width, height)
         except Exception:
-            pass
+            logger.exception("Failed to update ArkLoop window bounds")
 
     def set_overlay_mode(self, enabled: bool) -> Dict[str, Any]:
         """Switch between the full editor and compact transparent overlay."""
@@ -784,12 +782,28 @@ class ArkLoopApi:
             logger.exception("Failed to switch ArkLoop overlay mode")
             return {"ok": False, "error": str(exc)}
 
+    def begin_window_drag(self) -> Dict[str, Any]:
+        """Start the native Windows move loop for the compact overlay."""
+        try:
+            return self.window_overlay.begin_drag()
+        except Exception as exc:
+            logger.exception("Failed to begin ArkLoop window drag")
+            return {"ok": False, "error": str(exc)}
+
     def set_overlay_locked(self, locked: bool) -> Dict[str, Any]:
         """Enable or disable native click-through for the compact overlay."""
         try:
             return self.window_overlay.set_locked(bool(locked))
         except Exception as exc:
             logger.exception("Failed to change ArkLoop overlay lock")
+            return {"ok": False, "error": str(exc)}
+
+    def set_overlay_opacity(self, opacity: float) -> Dict[str, Any]:
+        """Adjust compact-overlay opacity without affecting the full editor."""
+        try:
+            return self.window_overlay.set_opacity(opacity)
+        except Exception as exc:
+            logger.exception("Failed to change ArkLoop overlay opacity")
             return {"ok": False, "error": str(exc)}
 
     # ------------------------------------------------------------------
