@@ -1,115 +1,280 @@
 <!-- markdownlint-disable MD033 MD041 -->
 <div align="center">
 
-<img src="./makima.jpg" alt="ArkLoop" width="160" />
+<img src="./makima.jpg" alt="ArkLoop" width="220" />
 
 # ArkLoop
 
-<p align="center">
-  <img alt="Python" src="https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white" />
-  <img alt="Platform" src="https://img.shields.io/badge/platform-Windows-blue" />
-  <img alt="MaaFramework" src="https://img.shields.io/badge/MaaFramework-powered-7C3AED" />
-  <img alt="PyWebview" src="https://img.shields.io/badge/UI-PyWebview%20%2B%20React-3B82F6" />
-  <br>
-  <a href="./LICENSE"><img alt="License" src="https://img.shields.io/github/license/Coodist/ArkLoop" /></a>
-  <a href="https://github.com/Coodist/ArkLoop/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/Coodist/ArkLoop?style=social" /></a>
+面向《明日方舟》与 MuMu 模拟器 12 的作战时间轴录制、编辑与精确回放工具
+
+<p>
+  <img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" />
+  <img alt="Windows" src="https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white" />
+  <img alt="MaaFramework" src="https://img.shields.io/badge/MaaFramework-powered-6C5CE7" />
+  <img alt="React" src="https://img.shields.io/badge/UI-PyWebview%20%2B%20React-149ECA?logo=react&logoColor=white" />
+  <a href="./LICENSE"><img alt="License" src="https://img.shields.io/github/license/Tim23333/ArkLoop_T" /></a>
 </p>
 
-明日方舟 MuMu12 模拟器帧级作战轴录制与回放工具<br>
-支持录制操作轴、自动执行轴、续录、轴编辑与截图辅助<br>
-<a href="https://github.com/Coodist/ArkLoop" target="_blank"><b>🔗 本项目 GitHub 仓库</b></a><br>
-如果这个项目对你有帮助，欢迎在仓库右上角点个 Star ⭐
+[使用说明](./HOWTOUSE.md) · [当前架构](./docs/current-architecture.md) · [源码仓库](https://github.com/Tim23333/ArkLoop_T)
 
 </div>
 
----
+## 项目简介
 
-> 📖 **详细使用说明请查看 [HOWTOUSE.md](./HOWTOUSE.md)**
->
-> 本篇 README 只包含项目概览、开发构建与鸣谢信息。
+ArkLoop 将一次作战拆成带有绝对帧号的部署、技能和撤退动作，并提供从实时录制、可视化编辑到自动回放的完整工作流。
 
-## 功能
+当前版本只有一个正式入口：`scripts/arkloop_webview.py`。桌面端由 PyWebview 承载 React 时间轴编辑器；Python 后端负责 MuMu 画面采集、输入监听、动作识别、坐标换算和精确回放。
 
-- **录制轴**：在 MuMu12 中实时录制部署 / 技能 / 撤退操作，自动生成时间轴
-- **执行轴**：加载已有时间轴，按帧级精度自动复刻操作
-- **续录轴**：执行或暂停后可继续录制，方便分段摸索
-- **轴编辑**：可视化时间轴编辑器，支持新建、编辑、删除、拖动操作节点
-- **截图辅助**：选中轴并进图后可截取带坐标标注的游戏画面
-- **循环凹图**：配合断点与重试逻辑反复执行同一轴
+回放时间统一来自外部 WebSocket 游戏时间服务提供的 `frame_count`。旧费用条校准、费用条帧数推断、离线视频识别、Excel 执行和旧 CLI 已不再属于当前运行架构。
+
+## 主要功能
+
+- **实时录制**：监听 MuMu 中的操作，识别部署、技能、撤退并写入绝对帧号。
+- **精确回放**：在动作前预选，接近目标帧后进入暂停与逐帧控制，在暂停状态完成输入并确认恢复。
+- **统一播放控制**：`PlaybackController` 集中管理等待、暂停、逐帧、动作执行、恢复、断点和停止。
+- **可视化编辑**：按部署、技能、撤退三条轨道显示动作，支持新建、编辑、删除和拖动调整帧数。
+- **分段续作**：暂停后保留当前帧与已部署状态，可继续回放或从当前位置继续录制。
+- **时间轴管理**：支持新建、复制、重命名、导入、导出、固定、预设和断点保存。
+- **地图辅助**：读取关卡地图与干员资源，提供格子坐标截图和手动动作补充。
+
+## 运行要求
+
+| 项目 | 要求 |
+| --- | --- |
+| 操作系统 | Windows 10/11 64 位 |
+| 模拟器 | MuMu 模拟器 12，建议使用 1280×720、DirectX 渲染 |
+| Python | 推荐 3.11，使用项目内 `.venv` |
+| Node.js | 用于构建 React 前端，建议 18 或更高版本 |
+| 游戏时间源 | 外部 WebSocket 服务，必须持续推送绝对 `frame_count` |
+
+> ArkLoop 仓库不包含游戏内存时间服务。时间服务未连接时可以浏览和编辑时间轴，但无法正常录制或精确回放。
+
+时间服务消息格式：
+
+```json
+{
+  "game_time": 12.345,
+  "frame_count": 185,
+  "connected": true
+}
+```
+
+- `frame_count`：从本次战斗开始计算的绝对逻辑帧，录制与回放的唯一调度依据。
+- `game_time`：用于界面显示的游戏时间。
+- `connected`：时间服务对游戏数据的读取状态。
+
+默认地址为 `ws://127.0.0.1:59555`，可在应用设置或 `config.json` 的 `time_source.ws_url` 中修改。
 
 ## 快速开始
 
+### 1. 获取源码
+
 ```powershell
-# 克隆仓库
-git clone https://github.com/Coodist/ArkLoop.git
-cd ArkLoop
-
-# 安装 Python 依赖
-.venv\Scripts\python -m pip install -r requirements.txt
-
-# （可选）GPU 加速头像模板匹配 —— 需 NVIDIA 显卡
-# 不装则用 CPU 匹配（结果一致，仅速度差异）。装后 EXE 体积会从 ~540MB 涨到 ~4.9GB。
-# .venv\Scripts\python -m pip install -r requirements-gpu.txt
-
-# 构建前端
-cd ui
-npm install
-npm run build
-cd ..
-
-# 运行桌面端
-.venv\Scripts\python scripts\arkloop_webview.py
+git clone https://github.com/Tim23333/ArkLoop_T.git
+cd ArkLoop_T
 ```
 
-打包为独立 EXE：
+### 2. 创建 Python 环境
+
+```powershell
+py -3.11 -m venv .venv
+.venv\Scripts\python.exe -m pip install --upgrade pip
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+可选的 NVIDIA GPU 头像匹配依赖：
+
+```powershell
+.venv\Scripts\python.exe -m pip install -r requirements-gpu.txt
+```
+
+不安装 GPU 依赖时会使用 CPU 路径，不影响时间轴格式和功能。
+
+### 3. 构建前端
+
+```powershell
+Set-Location ui
+npm install
+npm run build
+Set-Location ..
+```
+
+### 4. 准备配置
+
+```powershell
+Copy-Item config.example.json config.json
+```
+
+启动后在设置中确认以下内容：
+
+- MuMu 安装目录、实例编号、父窗口名与渲染子窗口名。
+- 外部游戏时间服务的 WebSocket 地址及连接状态。
+- MuMu 已启动，并使用与时间轴关卡一致的地图和队伍。
+
+### 5. 启动桌面端
+
+```powershell
+.venv\Scripts\python.exe scripts\arkloop_webview.py
+```
+
+首次使用可参考 [HOWTOUSE.md](./HOWTOUSE.md) 中的 MuMu 配置流程和操作注意事项。
+
+## 基本工作流
+
+### 录制时间轴
+
+1. 启动 MuMu、游戏时间服务和 ArkLoop。
+2. 新建或选中时间轴，确认关卡配置正确。
+3. 点击录制，在 MuMu 中执行部署、技能和撤退。
+4. 停止录制后检查识别结果，必要时在编辑器中修正干员、位置、方向或帧数。
+
+### 回放时间轴
+
+1. 进入对应关卡并准备好时间轴所需队伍。
+2. 确认界面显示时间服务已连接。
+3. 选中时间轴并开始播放。
+4. 控制器会根据每个动作的绝对帧完成预选、精确暂停、动作输入和恢复。
+
+### 分段续录
+
+1. 在回放或录制过程中暂停。
+2. ArkLoop 保存当前绝对帧和识别状态。
+3. 选择继续播放，或从当前帧开始继续录制后续动作。
+
+录制期间不要移动或缩放 MuMu 窗口；部署时尽量将鼠标拖到目标格中心。更完整的操作注意事项见 [HOWTOUSE.md](./HOWTOUSE.md)。
+
+## 时间轴格式
+
+新时间轴使用绝对 `frame`，可执行动作仅包含 `部署`、`技能`、`撤退`：
+
+```json
+{
+  "settings": {
+    "map_code": "1-7",
+    "breakpoints": [900]
+  },
+  "actions": [
+    {
+      "frame": 120,
+      "action_type": "部署",
+      "oper": "斑点",
+      "pos": "C3",
+      "direction": "右"
+    },
+    {
+      "frame": 600,
+      "action_type": "技能",
+      "oper": "斑点",
+      "pos": "C3",
+      "direction": "无"
+    },
+    {
+      "frame": 840,
+      "action_type": "撤退",
+      "oper": "斑点",
+      "pos": "C3",
+      "direction": "无"
+    }
+  ]
+}
+```
+
+旧文件中的 `cycle` / `tick` 仍可在加载时转换为 `frame`，`max_tick` 仅为旧格式兼容项。新录制文件不会写入 `bullet_threshold` 或 `frame_threshold`，精确回放参数由程序自身配置。
+
+## 架构概览
+
+```text
+ui/src
+  React 时间轴编辑器
+      │ pywebview API / backend events
+      ▼
+scripts/arkloop_webview.py
+  桌面端组合入口与运行生命周期
+      ├─ recorder/backend.py
+      │    实时输入、画面与动作识别
+      ├─ src/axis/axis_runner.py
+      │    选择并准备下一个时间轴动作
+      ├─ src/axis/playback_controller.py
+      │    暂停、逐帧、执行、恢复、断点与停止
+      ├─ src/desktop/
+      │    配置、资源、时间轴文件与状态发布
+      ├─ src/mumu/ + src/maa/
+      │    MuMu 输入/截图与图像识别
+      └─ src/logic/ws_time_source.py
+           绝对 frame_count 时间源
+```
+
+核心目录：
+
+| 路径 | 职责 |
+| --- | --- |
+| `scripts/arkloop_webview.py` | 唯一正式桌面入口、API 暴露与运行生命周期 |
+| `ui/src/` | React 时间轴编辑器与后端桥接 |
+| `recorder/` | 实时动作录制、识别与时间轴生成 |
+| `src/axis/` | JSON 加载、动作调度与集中式播放控制 |
+| `src/desktop/` | 配置、资源、时间轴和前端状态服务 |
+| `src/logic/` | 动作模型、坐标逻辑、输入执行与 WS 时间读取 |
+| `src/mumu/` | MuMu 窗口连接、截图和输入注入 |
+| `src/maa/` | MaaFramework 识别节点与适配层 |
+| `resource/` | 地图、干员头像及映射数据 |
+| `timelines/` | 用户时间轴与本地预设数据 |
+
+详细边界见 [docs/current-architecture.md](./docs/current-architecture.md) 和 [docs/recording-pipeline.md](./docs/recording-pipeline.md)。
+
+## 构建与测试
+
+运行 Python 正式测试集：
+
+```powershell
+.venv\Scripts\python.exe -m pip install pytest
+.venv\Scripts\python.exe -m pytest tests -q
+```
+
+检查前端构建：
+
+```powershell
+Set-Location ui
+npm run build
+```
+
+打包独立程序：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File build_arkloop.ps1
 ```
 
-输出位置：
+输出目录：`dist\ArkLoop\ArkLoop.exe`。
 
-```text
-dist\ArkLoop\ArkLoop.exe
-```
+## 当前架构边界
 
-## 项目结构
+以下功能已经删除，不应作为当前使用方式或新代码依赖：
 
-```text
-scripts/                正式入口
-  arkloop_webview.py    PyWebview + React 桌面端主入口
-src/                    核心逻辑
-  desktop/              PyWebview API 服务：配置、时间轴、资源、状态发布
-  mumu/                 MuMu 模拟器连接、截图、输入注入
-  frame/                实时帧源
-  logic/                坐标投影、游戏输入、WebSocket 时间源
-  axis/                 时间轴调度、PlaybackController、JSON 加载
-  maa/                  MAA 识别相关配置与节点
-recorder/               实时录制后端与动作识别
-ui/                     React + Vite + Tailwind 时间轴编辑器
-test_scripts/           开发调试脚本
-tools/                  资源同步与预处理脚本
-resource/               游戏数据：头像、地图、干员/关卡映射表
-timelines/              用户时间轴（运行时生成，已 gitignore）
-```
+- 费用条校准与费用像素帧数推断。
+- 离线视频扫描和离线时间轴生成。
+- 旧校准覆盖层与离线暂停检测。
+- Excel/JSON 执行 CLI 与 Excel COM 执行层。
+- 在时间轴 JSON 中覆盖精确回放阈值。
 
-## 日志
+## 日志与问题反馈
 
-运行 `ArkLoop.exe` 或 `scripts\arkloop_webview.py` 时，日志会输出到伴随的黑色命令行窗口中。调试截图与 ROI 图片默认写入 `debug/` 目录（已 gitignore）。
+源码模式和打包模式默认使用控制台日志。出现无法录制、动作帧偏移、部署失败或暂停状态异常时，请保留：
+
+- 完整控制台日志。
+- 对应时间轴 JSON。
+- 问题发生前后的 MuMu 与 ArkLoop 截图。
+- 可重复触发问题的操作步骤。
 
 ## 鸣谢
 
-### 依赖
+- [MaaFramework](https://github.com/MaaXYZ/MaaFramework)：图像识别与自动化框架。
+- [yuanyan3060/Arknights-Tile-Pos](https://github.com/yuanyan3060/Arknights-Tile-Pos)：地图坐标数据。
+- [yuanyan3060/ArknightsGameResource](https://github.com/yuanyan3060/ArknightsGameResource)：干员头像等游戏资源。
+- [MaaAssistantArknights](https://github.com/MaaAssistantArknights/MaaAssistantArknights)：地图与战斗数据参考。
+- [Windsland52/ArknightsAutoOperator](https://github.com/Windsland52/ArknightsAutoOperator)：自动操作实现参考。
+- [prts-plus](https://github.com/jue-ce-zhe/prts-plus)：动作模型、坐标投影和执行器设计参考。
 
-- [MaaFramework](https://github.com/MaaXYZ/MaaFramework) — 图像识别自动化框架
-- [PyWebview](https://pywebview.flowrl.com/) — 桌面 WebView 容器
-- [React](https://react.dev/) / [Vite](https://vitejs.dev/) / [Tailwind CSS](https://tailwindcss.com/) — 前端编辑器
-- [Python](https://www.python.org/) / [OpenCV](https://opencv.org/) / [NumPy](https://numpy.org/) / [Pillow](https://python-pillow.org/)
+## 许可证与声明
 
-### 参考项目
+本项目使用 [AGPL-3.0](./LICENSE) 许可证。
 
-- [yuanyan3060/Arknights-Tile-Pos](https://github.com/yuanyan3060/Arknights-Tile-Pos) — 地图坐标数据
-- [yuanyan3060/ArknightsGameResource](https://github.com/yuanyan3060/ArknightsGameResource) — 干员头像等游戏资源
-- [Windsland52/ArknightsAutoOperator](https://github.com/Windsland52/ArknightsAutoOperator) — 帧级自动操作参考
-- [MaaAssistantArknights](https://github.com/MaaAssistantArknights/MaaAssistantArknights) — 地图数据（`Arknights-Tile-Pos`）与粗流程参照
-- [prts-plus](https://github.com/jue-ce-zhe/prts-plus) — 帧级自动操作的执行器算法（action / 投影 / 配置）
+ArkLoop 是非官方社区工具，与 Hypergryph、Yostar、MuMu 模拟器及上述开源项目的维护团队不存在隶属关系。游戏名称、角色和资源的相关权利归其各自权利人所有。
