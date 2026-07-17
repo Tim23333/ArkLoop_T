@@ -21,6 +21,8 @@
 
 ## 项目简介
 
+前置需求: https://github.com/Tim23333/Arknights_timer
+
 ArkLoop 将一次作战拆成带有绝对帧号的部署、技能和撤退动作，并提供从实时录制、可视化编辑到自动回放的完整工作流。
 
 当前版本只有一个正式入口：`scripts/arkloop_webview.py`。桌面端由 PyWebview 承载 React 时间轴编辑器；Python 后端负责 MuMu 画面采集、输入监听、动作识别、坐标换算和精确回放。
