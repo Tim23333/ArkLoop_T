@@ -245,7 +245,7 @@ npm run build
 powershell -ExecutionPolicy Bypass -File build_arkloop.ps1
 ```
 
-该命令默认只重建 CPU 主程序，并保留 `dist\ArkLoop\dependencies` 中已安装的 GPU 依赖和现有安装器。需要同时发布新版依赖安装器时使用：
+该命令默认只重建 CPU 主程序，并保留 `dist\ArkLoop\dependencies` 中已安装的 GPU 依赖和现有安装器。完成全部构建与本地部署后，会自动生成可直接发布到 GitHub 的 `dist\ArkLoop-CPU.zip`。需要同时发布新版依赖安装器时使用：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File build_arkloop.ps1 -BuildInstaller
@@ -255,6 +255,7 @@ powershell -ExecutionPolicy Bypass -File build_arkloop.ps1 -BuildInstaller
 
 - `dist\ArkLoop\ArkLoop.exe`：默认 CPU 识别的主程序，不包含 Torch/CUDA。
 - `dist\ArkLoop\ArkLoopDependencyInstaller.exe`：可选依赖安装器。
+- `dist\ArkLoop-CPU.zip`：干净的 CPU 发布包；不包含本机 `dependencies`、日志、个人配置或个人时间轴。默认构建不包含旧依赖安装器，使用 `-BuildInstaller` 时会包含本次新构建的安装器。
 
 打包版用户首次运行依赖安装器时可以选择：
 

@@ -34,7 +34,7 @@ New-Item -ItemType Directory -Force -Path $packageDist | Out-Null
 
 $py = Join-Path $root '.venv\Scripts\python.exe'
 if (-not (Test-Path $py)) { throw ".venv not found at $py" }
-$totalSteps = if ($BuildInstaller) { 4 } else { 3 }
+$totalSteps = if ($BuildInstaller) { 5 } else { 4 }
 
 # 1. Build frontend
 Write-Host "[1/$totalSteps] Building frontend (ui)..." -ForegroundColor Cyan
@@ -53,7 +53,7 @@ if (-not (Test-Path (Join-Path $root 'icon.ico'))) {
 }
 
 # 3. Run PyInstaller
-$mainStep = if ($BuildInstaller) { '[3/4]' } else { '[3/3]' }
+$mainStep = "[3/$totalSteps]"
 Write-Host "$mainStep Building CPU-only ArkLoop..." -ForegroundColor Cyan
 & $py -m PyInstaller arkloop.spec --clean --noconfirm --distpath $packageDist --workpath $mainWork
 if ($LASTEXITCODE -ne 0) {
@@ -69,7 +69,7 @@ if (-not (Test-Path $stagedOut)) {
 if ($BuildInstaller) {
     # The installer contains pip, but never Torch itself. Build it only for an
     # installer release; ordinary app rebuilds leave the existing EXE intact.
-    Write-Host '[4/4] Building optional dependency installer...' -ForegroundColor Cyan
+    Write-Host "[4/$totalSteps] Building optional dependency installer..." -ForegroundColor Cyan
     & $py -m PyInstaller dependency_installer.spec --clean --noconfirm --distpath $packageDist --workpath $installerWork
     if ($LASTEXITCODE -ne 0) {
         throw "Dependency installer build failed with exit code $LASTEXITCODE."
@@ -138,9 +138,75 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     $utf8NoBom
 )
 
+# Build the GitHub release archive from this run's clean PyInstaller staging
+# directory. Never archive dist\ArkLoop directly: that directory intentionally
+# preserves local GPU dependencies, logs, config and timelines across rebuilds.
+$archiveStep = if ($BuildInstaller) { 5 } else { 4 }
+Write-Host "[$archiveStep/$totalSteps] Creating CPU release ZIP..." -ForegroundColor Cyan
+$releaseStageParent = Join-Path $packageRoot 'release'
+$releaseStage = Join-Path $releaseStageParent 'ArkLoop'
+$releaseZip = Join-Path $root 'dist\ArkLoop-CPU.zip'
+
+if (Test-Path -LiteralPath $releaseStageParent) {
+    Remove-Item -LiteralPath $releaseStageParent -Recurse -Force
+}
+New-Item -ItemType Directory -Force -Path $releaseStageParent | Out-Null
+Copy-Item -LiteralPath $stagedDist -Destination $releaseStage -Recurse -Force
+
+# A frozen build defaults to CPU when dependencies/ is absent. Remove the
+# directory defensively so a release can never inherit the builder's CUDA files.
+$releaseDependencies = Join-Path $releaseStage 'dependencies'
+if (Test-Path -LiteralPath $releaseDependencies) {
+    Remove-Item -LiteralPath $releaseDependencies -Recurse -Force
+}
+Copy-Item -LiteralPath (Join-Path $root 'config.example.json') `
+    -Destination (Join-Path $releaseStage 'config.json') -Force
+
+if (Test-Path -LiteralPath $releaseZip) {
+    Remove-Item -LiteralPath $releaseZip -Force
+}
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$releaseStageParentFull = [System.IO.Path]::GetFullPath($releaseStageParent).TrimEnd('\') + '\'
+$zipStream = [System.IO.File]::Open(
+    $releaseZip,
+    [System.IO.FileMode]::CreateNew,
+    [System.IO.FileAccess]::Write,
+    [System.IO.FileShare]::None
+)
+$zipArchive = [System.IO.Compression.ZipArchive]::new(
+    $zipStream,
+    [System.IO.Compression.ZipArchiveMode]::Create,
+    $false
+)
+try {
+    # Explicit directory entries preserve empty folders such as timelines/.
+    Get-ChildItem -LiteralPath $releaseStageParent -Directory -Recurse | ForEach-Object {
+        $relativePath = $_.FullName.Substring($releaseStageParentFull.Length).Replace('\', '/')
+        $zipArchive.CreateEntry($relativePath.TrimEnd('/') + '/') | Out-Null
+    }
+    Get-ChildItem -LiteralPath $releaseStageParent -File -Recurse | ForEach-Object {
+        $relativePath = $_.FullName.Substring($releaseStageParentFull.Length).Replace('\', '/')
+        [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+            $zipArchive,
+            $_.FullName,
+            $relativePath,
+            [System.IO.Compression.CompressionLevel]::Optimal
+        ) | Out-Null
+    }
+}
+finally {
+    $zipArchive.Dispose()
+    $zipStream.Dispose()
+}
+if (-not (Test-Path -LiteralPath $releaseZip) -or (Get-Item -LiteralPath $releaseZip).Length -le 0) {
+    throw 'CPU release ZIP was not created correctly.'
+}
+
 $out = Join-Path $distDir 'ArkLoop.exe'
 $installerOut = Join-Path $distDir 'ArkLoopDependencyInstaller.exe'
 Write-Host "Build OK: $out" -ForegroundColor Green
+Write-Host "CPU release ZIP: $releaseZip" -ForegroundColor Green
 Write-Host "Runtime mode reset to CPU; GPU dependency files were preserved." -ForegroundColor Green
 if (Test-Path -LiteralPath $installerOut) {
     Write-Host "Dependency installer: $installerOut" -ForegroundColor Green
